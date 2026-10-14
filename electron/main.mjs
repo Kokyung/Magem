@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, powerMonitor, session, shell, utilityProcess } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -15,6 +15,16 @@ let win = null;
 let quitting = false;
 let mainLog = null;
 let reloadWindow = null; // set per window by watchRenderer
+let windowLoading = null; // a createWindow() still in progress, so a second "open" waits for the same window
+let started = false;      // the first window is on its way: before that, nothing may open another one
+
+// Windows: closing the window can leave the app running in the system tray, so indexing carries on
+const IS_WIN = process.platform === "win32";
+let runInBackground = true;
+let tray = null;
+let trayLabels = { open: "Open Magem", settings: "Settings", quit: "Quit" }; // replaced by the page's language
+// login items only make sense for the installed app: in development they would register the bare Electron binary
+const LOGIN_ITEM_PLATFORM = process.platform === "darwin" || IS_WIN;
 
 /** Lifecycle events worth keeping across launches (renderer/GPU deaths, sleep/wake) for diagnosis. */
 function logMain(message) {
@@ -52,9 +62,7 @@ function migrateDataDir() {
   }
   return true;
 }
-app.on("second-instance", () => {
-  if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
-});
+app.on("second-instance", () => { showWindow(); });
 
 function startBackend() {
   const dataDir = app.getPath("userData");
@@ -180,14 +188,77 @@ function watchRenderer(w) {
 const windowBackground = () => (nativeTheme.shouldUseDarkColors ? "#07111f" : "#f5faff");
 const THEMES = new Set(["system", "light", "dark"]);
 
-/** Apply the saved theme before the window exists, so it doesn't flash the wrong colours. */
-async function applySavedTheme() {
+/** Apply saved settings the main process needs before the window exists (no flash of the wrong theme). */
+async function applySavedPrefs() {
   try {
     const res = await fetch(`${baseUrl}/api/prefs`, { headers: { cookie: `mmf=${TOKEN}` } });
-    const theme = (await res.json())["mmf.theme"];
-    if (THEMES.has(theme)) nativeTheme.themeSource = theme;
-  } catch { /* system default */ }
+    const prefs = await res.json();
+    if (THEMES.has(prefs["mmf.theme"])) nativeTheme.themeSource = prefs["mmf.theme"];
+    runInBackground = prefs["mmf.background"] !== false;
+  } catch { /* defaults */ }
 }
+
+/** Bring the window back (recreating it if it was closed), optionally opening the settings panel. */
+async function showWindow(panel) {
+  if (!started || quitting) return;
+  try {
+    if (!win) windowLoading = loadWindow();
+    else { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+    if (windowLoading) await windowLoading;
+  } catch (e) {
+    logMain(`opening the window failed: ${e.message}`);
+    return;
+  }
+  if (panel === "settings" && win && !win.isDestroyed()) win.webContents.send("open-settings");
+}
+
+/** createWindow(), remembered only while it runs (a failed first load may still recover by itself). */
+function loadWindow() {
+  const loading = createWindow().finally(() => { if (windowLoading === loading) windowLoading = null; });
+  return loading;
+}
+
+function createTray() {
+  const logo = nativeImage.createFromPath(path.join(APP_ROOT, "static", "logo.png"));
+  const icon = nativeImage.createEmpty();
+  for (const scaleFactor of [1, 1.25, 1.5, 2]) {
+    icon.addRepresentation({ scaleFactor, buffer: logo.resize({ width: Math.round(16 * scaleFactor), quality: "best" }).toPNG() });
+  }
+  tray = new Tray(icon);
+  tray.setToolTip("Magem");
+  tray.on("click", () => showWindow());
+  updateTrayMenu();
+}
+function updateTrayMenu() {
+  tray?.setContextMenu(Menu.buildFromTemplate([
+    { label: trayLabels.open, click: () => showWindow() },
+    { label: trayLabels.settings, click: () => showWindow("settings") },
+    { type: "separator" },
+    { label: trayLabels.quit, click: () => app.quit() },
+  ]));
+}
+
+ipcMain.handle("get-app-settings", () => ({
+  openAtLogin: {
+    shown: LOGIN_ITEM_PLATFORM,
+    available: LOGIN_ITEM_PLATFORM && app.isPackaged,
+    enabled: LOGIN_ITEM_PLATFORM && app.isPackaged && app.getLoginItemSettings().openAtLogin,
+  },
+  runInBackground: IS_WIN ? runInBackground : null, // other platforms: not offered
+}));
+ipcMain.handle("set-open-at-login", (_e, on) => {
+  if (!LOGIN_ITEM_PLATFORM || !app.isPackaged) return false;
+  app.setLoginItemSettings({ openAtLogin: on === true });
+  return app.getLoginItemSettings().openAtLogin; // what the OS actually accepted
+});
+ipcMain.handle("set-run-in-background", (_e, on) => { runInBackground = on === true; });
+// menu text arrives already translated by the page; only plain strings are used, as labels
+ipcMain.handle("set-tray-labels", (_e, labels) => {
+  for (const key of Object.keys(trayLabels)) {
+    if (typeof labels?.[key] === "string" && labels[key].trim()) trayLabels[key] = labels[key].slice(0, 100);
+  }
+  updateTrayMenu();
+});
 
 // the page drives the theme; nativeTheme also flips prefers-color-scheme for its CSS
 ipcMain.handle("set-theme", (_e, theme) => {
@@ -271,8 +342,11 @@ app.whenReady().then(async () => {
     const port = await startBackend();
     baseUrl = `http://127.0.0.1:${port}`;
     await setAuthCookie();
-    await applySavedTheme();
-    await createWindow();
+    await applySavedPrefs();
+    if (IS_WIN) createTray();
+    windowLoading = loadWindow(); // not showWindow(): a failure here should end in the error dialog below
+    started = true;
+    await windowLoading;
   } catch (e) {
     dialog.showErrorBox("Magem", e.message);
     app.quit();
@@ -280,10 +354,14 @@ app.whenReady().then(async () => {
 });
 
 app.on("activate", () => {
-  if (!win && baseUrl) createWindow();
+  if (!win) showWindow();
   else reviveWindow("activate");
 });
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+app.on("window-all-closed", () => {
+  if (process.platform === "darwin") return;
+  if (IS_WIN && tray && runInBackground && !quitting) return; // keeps indexing; reopened from the tray
+  app.quit();
+});
 app.on("before-quit", () => {
   quitting = true;
   backend?.kill();

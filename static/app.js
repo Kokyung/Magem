@@ -833,6 +833,7 @@ function applyLanguage(code) {
   render();
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
   if (lastStatus) renderStatus(lastStatus);
+  window.mmf?.setTrayLabels?.({ open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit") });
 }
 
 for (const [code, name] of LANGUAGES) $("langSelect").add(new Option(name, code));
@@ -841,6 +842,26 @@ $("themeSelect").onchange = (e) => {
   store.set("mmf.theme", e.target.value);
   window.mmf?.setTheme(e.target.value); // the main process switches the page's light/dark preference
 };
+
+/** Startup and background options live in the main process (the OS login item, the tray), so ask it. */
+async function loadAppSettings() {
+  let s;
+  try { s = await window.mmf.getAppSettings(); } catch { return; }
+  $("startupRow").classList.toggle("hidden", !s.openAtLogin.shown);
+  $("startupCheck").disabled = !s.openAtLogin.available; // development build: nothing to register
+  $("startupCheck").checked = s.openAtLogin.enabled;
+  $("backgroundRow").classList.toggle("hidden", s.runInBackground == null);
+  $("backgroundCheck").checked = !!s.runInBackground;
+}
+$("startupCheck").onchange = async (e) => {
+  try { e.target.checked = await window.mmf.setOpenAtLogin(e.target.checked); }
+  catch (err) { e.target.checked = !e.target.checked; toast(`Couldn't change the startup setting: ${err.message}`); }
+};
+$("backgroundCheck").onchange = (e) => {
+  store.set("mmf.background", e.target.checked);
+  window.mmf.setRunInBackground(e.target.checked);
+};
+window.mmf?.onOpenSettings?.(() => openDrawer("settings")); // "Settings" in the tray menu
 
 // ---------- drawers, folders & status ----------
 function openDrawer(id) {
@@ -992,6 +1013,7 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   prefsLoaded = true;
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
+  loadAppSettings();
   state.view = store.get("mmf.view", "image") === "text" ? "text" : "image";
   $("viewSelect").value = state.view;
   readBrowseSort();
