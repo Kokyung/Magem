@@ -1,29 +1,39 @@
 :root {
-  --bg: #f6f5f2;
+  --bg: #f5faff;
   --surface: #ffffff;
-  --surface-2: #efede8;
-  --text: #1d1c1a;
-  --muted: #74706a;
-  --border: #e2dfd8;
-  --accent: #c2410c;
-  --accent-ink: #ffffff;
-  --shadow: 0 10px 30px rgba(20, 16, 10, .12);
+  --surface-2: #ecf6ff;
+  --text: #172033;
+  --muted: #64748b;
+  --border: #d7e7f5;
+  --accent: #2186f4;        /* primary */
+  --accent-hover: #0d6fdc;
+  --accent-ink: #ffffff;    /* text on primary */
+  --violet: #8548e8;
+  --mint: #3bc7bd;
+  --highlight: #f5c842;
+  --highlight-ink: #172033;
+  --shadow: 0 10px 30px rgba(23, 32, 51, .10);
   --radius: 12px;
   color-scheme: light;
 }
-/* dark: the navy of the app icon, with the gem's blue as the accent. The theme setting switches this
-   media query through Electron's nativeTheme, so there is no separate class to keep in sync. */
+/* The theme setting switches this media query through Electron's nativeTheme,
+   so there is no separate class to keep in sync. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f163c;
-    --surface: #172150;
-    --surface-2: #1f2b5e;
-    --text: #e9edfb;
-    --muted: #9ba5cc;
-    --border: #2a376c;
-    --accent: #5cb8ff;
-    --accent-ink: #071233;
-    --shadow: 0 10px 30px rgba(3, 6, 24, .55);
+    --bg: #07111f;
+    --surface: #0d1b2a;
+    --surface-2: #12263a;
+    --text: #f4f8fc;
+    --muted: #9db1c5;
+    --border: #25405a;
+    --accent: #48a8ff;
+    --accent-hover: #67b7ff;
+    --accent-ink: #07111f;  /* white on this light blue would be hard to read */
+    --violet: #a66bff;
+    --mint: #56ded1;
+    --highlight: #ffd75e;
+    --highlight-ink: #07111f;
+    --shadow: 0 10px 30px rgba(0, 0, 0, .5);
     color-scheme: dark;
   }
 }
@@ -80,7 +90,7 @@ input { font: inherit; color: inherit; }
 }
 .ghost:hover { border-color: var(--muted); }
 .primary { border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 10px 20px; font-weight: 600; }
-.primary:hover { filter: brightness(1.06); }
+.primary:hover { background: var(--accent-hover); }
 .wide { width: 100%; }
 
 /* toolbar */
@@ -100,7 +110,7 @@ select:hover, select:focus { border-color: var(--muted); }
 .browser-head .sort select { font-size: 13px; padding: 3px 8px; }
 .status { margin-inline-start: auto; color: var(--muted); font-size: 13px; text-align: end; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
 .progress { height: 3px; background: var(--surface-2); margin: 0 24px; border-radius: 3px; overflow: hidden; }
-.progress div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+.progress div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--violet)); transition: width .4s; }
 
 /* main */
 main { padding: 8px 24px 60px; }
@@ -109,7 +119,7 @@ main { padding: 8px 24px 60px; }
 .empty p { color: var(--muted); margin: 0 0 24px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .chips button { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 6px 14px; }
-.chips button:hover { border-color: var(--accent); color: var(--accent); }
+.chips button:hover { border-color: var(--accent-hover); color: var(--accent-hover); }
 .summary { color: var(--muted); font-size: 13px; margin: 4px 0 12px; min-height: 1em; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
 .tile {
@@ -138,7 +148,7 @@ main { padding: 8px 24px 60px; }
   text-align: start; background: linear-gradient(transparent, rgba(0,0,0,.78));
 }
 .tile .caption > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
-.tile .caption mark { background: var(--accent); color: var(--accent-ink); border-radius: 3px; padding: 0 2px; }
+.tile .caption mark { background: var(--highlight); color: var(--highlight-ink); border-radius: 3px; padding: 0 2px; }
 
 /* folder browser (start screen) */
 .browser { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 8px; }
@@ -154,7 +164,7 @@ main { padding: 8px 24px 60px; }
   border-radius: 10px; padding: 9px 12px; min-width: 0;
 }
 .dir-list button:hover { border-color: var(--muted); }
-.dir-list svg { flex: none; color: var(--accent); }
+.dir-list svg { flex: none; color: var(--mint); }
 .dir-list .dn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dir-list .dc { flex: none; font-size: 12px; color: var(--muted); }
 .tile.pending { cursor: default; display: grid; place-items: center; text-align: center; padding: 10px; color: var(--muted); font-size: 12px; border: 1px dashed var(--border); background: var(--surface); }
@@ -236,7 +246,7 @@ main { padding: 8px 24px 60px; }
   background: #222; border: 1px solid #333; border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.55;
   white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto;
 }
-.viewer .matched mark { background: var(--accent); color: var(--accent-ink); border-radius: 3px; padding: 0 2px; }
+.viewer .matched mark { background: var(--highlight); color: var(--highlight-ink); border-radius: 3px; padding: 0 2px; }
 #vText p { margin: 0 0 6px; }
 .col { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .moments { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

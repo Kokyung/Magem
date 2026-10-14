@@ -177,7 +177,7 @@ function watchRenderer(w) {
 }
 
 // window background behind the page, matching the theme (dark is the navy of the app icon)
-const windowBackground = () => (nativeTheme.shouldUseDarkColors ? "#0f163c" : "#f6f5f2");
+const windowBackground = () => (nativeTheme.shouldUseDarkColors ? "#07111f" : "#f5faff");
 const THEMES = new Set(["system", "light", "dark"]);
 
 /** Apply the saved theme before the window exists, so it doesn't flash the wrong colours. */
