@@ -5,7 +5,7 @@ import path from "node:path";
 import * as embedder from "./embedder.mjs";
 import { VISUAL, VISUAL_AUDIO, toPercent } from "./indexer.mjs";
 import { badRequest } from "./errors.mjs";
-import { prepareImage } from "./media.mjs";
+import { clipboardPng, prepareImage } from "./media.mjs";
 
 // Results below this relevance (%) are not shown at all.
 const MIN_RELEVANCE = 40;
@@ -227,6 +227,24 @@ export function createServer({ index, staticDir, token, modelName }) {
           const row = index.file(+body.id);
           return row ? json(res, row) : json(res, { error: "not found" }, 404);
         }
+        if (p === "/api/paths") {
+          if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 10000) return json(res, { error: "Select between 1 and 10,000 files" }, 400);
+          const paths = [];
+          for (const id of body.ids) {
+            const row = index.file(+id);
+            if (!row) return json(res, { error: "A selected file is no longer in the index" }, 404);
+            paths.push(row.path);
+          }
+          return json(res, { paths });
+        }
+        if (p === "/api/clipboard_image") {
+          const row = index.file(+body.id);
+          if (!row || row.kind !== "image") return json(res, { error: "not found" }, 404);
+          const png = await clipboardPng(row.path);
+          res.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length });
+          return res.end(png);
+        }
+        if (p === "/api/folder") return json(res, { path: body.path, root: index.browsableRoot(body.path) });
       }
       return json(res, { error: "not found" }, 404);
     } catch (e) {

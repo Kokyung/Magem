@@ -35,6 +35,8 @@ const state = {
   expanded: false,      // user paged a list: don't auto-refresh under them
   seq: 0, hasIndex: false, progress: null,
   viewer: { list: null, index: -1 },
+  searching: 0,         // seq of an image search still waiting for its first page (shows placeholders)
+  loadedInput: -1,      // the search input the results on screen belong to
 };
 
 // ---------- api ----------
@@ -93,7 +95,15 @@ async function runSearch(append = null) {
 
 async function runSearchNow(append) {
   const seq = ++state.seq;
+  const input = inputSeq;
   if (!append) state.expanded = false;
+  // a new image search waits on the image model: placeholders instead of the previous results
+  // (not for the automatic refreshes while indexing, which keep the same input)
+  if (!append && (state.imageBlob || state.similarVid != null) && state.loadedInput !== input) {
+    state.lists = {};
+    state.searching = seq;
+    render();
+  }
   try {
     if (state.imageBlob) {
       await loadMain(seq, append, (p) => {
@@ -119,8 +129,14 @@ async function runSearchNow(append) {
       state.lists = {};
       render();
     }
+    if (seq === state.seq) state.loadedInput = input;
   } catch (e) {
     if (seq === state.seq) toast(`Search failed: ${e.message}`);
+  } finally {
+    if (state.searching === seq) {
+      state.searching = 0;
+      if (!state.lists.main) render(); // failed: drop the placeholders
+    }
   }
 }
 
@@ -160,11 +176,20 @@ async function loadSections(seq, appendKey) {
 
 function render() {
   const active = isActive();
+  updateSelectAll();
   updateHome();
   $("viewMode").classList.toggle("hidden", !isTextQuery());
   const box = $("results");
   box.innerHTML = "";
   if (!active) { $("summary").textContent = ""; return; }
+  hideBoot();
+  syncSelection(`results ${inputSeq} ${state.type} ${state.audio} ${state.view}`); // the filters change what is shown
+  keepSelected(Object.values(state.lists).flatMap((l) => l.results));
+  if (state.searching === state.seq && !state.lists.main) { // only the latest search: a superseded one doesn't count
+    $("summary").innerHTML = `<span class="sk sk-line"></span>`;
+    box.appendChild(skeletonGrid(12));
+    return;
+  }
 
   if (state.lists.main) {
     const list = state.lists.main;
@@ -252,9 +277,155 @@ function tile(r, list, i) {
   const caption = r.text
     ? `<span class="caption"><span>${highlight(r.text.replace(/\s*\n\s*/g, " · "), state.query)}</span></span>`
     : `<span class="name">${esc(r.name)}</span>`;
-  b.innerHTML = `<img loading="lazy" src="/thumb/${r.thumb}" alt="">${badges}${caption}`;
+  b.dataset.id = r.id;
+  b.innerHTML = `<img loading="lazy" src="/thumb/${r.thumb}" alt="">${badges}${caption}`
+    + `<span class="check" role="checkbox" aria-label="${esc(t("select"))}"></span>`;
+  b.classList.toggle("selected", selection.ids.has(r.id));
+  b.querySelector(".check").setAttribute("aria-checked", selection.ids.has(r.id));
+  b.querySelector(".check").onclick = (e) => { e.stopPropagation(); toggleSelected(r.id); };
   b.onclick = () => { commitRecent(); openViewer(list, i); };
+  b.oncontextmenu = (e) => { e.preventDefault(); fileMenu(e, r); };
   return b;
+}
+
+/** Grey tiles that stand in for results that are still loading. */
+function skeletonGrid(n) {
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  grid.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < n; i++) {
+    const el = document.createElement("div");
+    el.className = "tile sk";
+    grid.appendChild(el);
+  }
+  return grid;
+}
+
+// the start screen's placeholders, until the first status and folder listing arrive
+$("bootGrid").appendChild(skeletonGrid(14));
+let booting = true;
+function hideBoot() {
+  if (!booting) return;
+  booting = false;
+  $("bootSkeleton").remove();
+}
+
+// ---------- selection & context menus ----------
+// Selection belongs to what is on screen (one search, or one folder): it is cleared when that changes.
+const selection = { ids: new Set(), key: "" };
+function syncSelection(key) {
+  if (selection.key === key) return;
+  selection.key = key;
+  clearSelection();
+}
+/** Drop selected files that are no longer listed (e.g. deleted outside the app), so they can't be copied blind. */
+function keepSelected(items) {
+  if (!selection.ids.size) return;
+  const listed = new Set(items.map((r) => r.id));
+  let changed = false;
+  for (const id of selection.ids) if (!listed.has(id)) { selection.ids.delete(id); changed = true; }
+  if (changed) updateSelection();
+}
+function toggleSelected(id) {
+  if (!selection.ids.delete(id)) selection.ids.add(id);
+  updateSelection();
+}
+function clearSelection() {
+  if (!selection.ids.size) return;
+  selection.ids.clear();
+  updateSelection();
+}
+
+/** Files the select-all toggle covers: what is loaded on screen, up to each "show more" button. */
+function selectableOnScreen() {
+  if (isActive()) return Object.values(state.lists).flatMap((l) => l.results);
+  return browse.data ? browse.data.files.slice(0, browse.shown).filter((f) => f.indexed) : [];
+}
+function updateSelectAll() {
+  const items = selectableOnScreen();
+  // anything selected → clicking clears it; nothing selected → it selects everything on screen
+  const all = items.length > 0 && items.every((r) => selection.ids.has(r.id));
+  const checked = all ? "true" : selection.ids.size ? "mixed" : "false";
+  const active = isActive();
+  for (const [id, shown] of [["resultsSelectAll", active], ["browseSelectAll", !active]]) {
+    $(id).setAttribute("aria-checked", checked);
+    $(id).classList.toggle("hidden", !shown || !items.length);
+  }
+}
+function toggleSelectAll() {
+  if (selection.ids.size) selection.ids.clear();
+  else for (const r of selectableOnScreen()) selection.ids.add(r.id);
+  updateSelection();
+}
+$("resultsSelectAll").onclick = toggleSelectAll;
+$("browseSelectAll").onclick = toggleSelectAll;
+
+function updateSelection() {
+  updateSelectAll();
+  document.body.classList.toggle("selecting", selection.ids.size > 0);
+  for (const el of document.querySelectorAll(".tile[data-id]")) {
+    const on = selection.ids.has(+el.dataset.id);
+    el.classList.toggle("selected", on);
+    el.querySelector(".check")?.setAttribute("aria-checked", on);
+  }
+}
+
+const menu = $("contextMenu");
+function openMenu(e, items) {
+  menu.innerHTML = "";
+  for (const item of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.textContent = item.label;
+    b.onclick = () => { closeMenu(); item.run(); };
+    menu.appendChild(b);
+  }
+  menu.classList.remove("hidden");
+  // keep the whole menu on screen
+  const { width, height } = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(e.clientX, innerWidth - width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(e.clientY, innerHeight - height - 4))}px`;
+}
+function closeMenu() { menu.classList.add("hidden"); }
+const menuOpen = () => !menu.classList.contains("hidden");
+document.addEventListener("mousedown", (e) => { if (!menu.contains(e.target)) closeMenu(); });
+document.addEventListener("scroll", closeMenu, true);
+window.addEventListener("blur", closeMenu);
+window.addEventListener("resize", closeMenu);
+
+/** "Error invoking remote method 'x': Error: msg" → "msg" */
+const ipcMessage = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+const copyAction = (fn) => async () => {
+  try { await fn(); toast(t("toast.copied")); } catch (e) { toast(`Couldn't copy: ${ipcMessage(e)}`, 4000); }
+};
+
+const MAX_COPY = 10000; // same limit as the main process and the engine
+
+/** Right-click on a file. With other files selected, it joins the selection and the menu acts on all of them. */
+function fileMenu(e, r) {
+  if (selection.ids.size && !selection.ids.has(r.id)) { selection.ids.add(r.id); updateSelection(); }
+  if (selection.ids.size > 1) {
+    const ids = [...selection.ids];
+    const copy = copyAction(async () => { await window.mmf.copyFiles(ids); clearSelection(); });
+    return openMenu(e, [{
+      label: t("menu.copyFile"),
+      // over the limit: say so in the UI language and keep the selection (the main process rejects it anyway)
+      run: () => (ids.length > MAX_COPY ? toast(t("toast.tooMany", { max: num(MAX_COPY), n: num(ids.length) }), 4000) : copy()),
+    }]);
+  }
+  singleFileMenu(e, r);
+}
+function singleFileMenu(e, r) {
+  openMenu(e, [
+    { label: t("menu.revealFile"), run: () => window.mmf.reveal(r.id).catch((err) => toast(`Can't open: ${ipcMessage(err)}`)) },
+    r.kind === "image" && { label: t("menu.copyImage"), run: copyAction(() => window.mmf.copyImage(r.id)) },
+    { label: t("menu.copyFile"), run: copyAction(async () => {
+      await window.mmf.copyFiles([r.id]);
+      if (selection.ids.has(r.id)) clearSelection(); // copied the (single) selection
+    }) },
+    { label: t("menu.copyPath"), run: copyAction(() => window.mmf.copyPaths([r.id])) },
+  ].filter(Boolean));
 }
 
 // ---------- viewer ----------
@@ -355,10 +526,22 @@ $("vSimilar").onclick = () => {
   window.scrollTo({ top: 0 });
 };
 
+$("viewerMedia").oncontextmenu = (e) => {
+  const r = viewerResult();
+  if (!r) return;
+  e.preventDefault();
+  singleFileMenu(e, r);
+};
+
 document.addEventListener("keydown", (e) => {
+  // any key dismisses an open menu (it acts on the file it was opened for, which arrows would change)
+  if (menuOpen()) { closeMenu(); if (e.key === "Escape") return; }
   const { list, index } = state.viewer;
   if (!list) {
-    if (e.key === "Escape") closeDrawers();
+    if (e.key === "Escape") {
+      if (selection.ids.size) clearSelection();
+      else closeDrawers();
+    }
     return;
   }
   if (e.key === "Escape") closeViewer();
@@ -418,7 +601,7 @@ function readBrowseSort() {
   const s = store.get(SORT_KEY, {});
   browseSort = { key: s?.key === "mtime" ? "mtime" : "name", dir: s?.dir === "desc" ? "desc" : "asc" };
   $("sortKey").value = browseSort.key;
-  $("sortDir").value = browseSort.dir;
+  updateSortDir();
 }
 
 /** Folders and files are ordered here, so changing the order doesn't need a round trip to the engine. */
@@ -433,14 +616,21 @@ function sortBrowse(d) {
   d.files.sort(cmp);
 }
 function changeBrowseSort() {
-  browseSort = { key: $("sortKey").value, dir: $("sortDir").value };
+  browseSort = { key: $("sortKey").value, dir: browseSort.dir };
+  updateSortDir();
   store.set(SORT_KEY, browseSort);
   if (!browse.data) return;
   sortBrowse(browse.data);
   renderBrowse();
 }
 $("sortKey").onchange = changeBrowseSort;
-$("sortDir").onchange = changeBrowseSort;
+$("sortDir").onclick = () => { browseSort.dir = browseSort.dir === "asc" ? "desc" : "asc"; changeBrowseSort(); };
+/** The icon shows the current order; screen readers get its name (no hover tooltip). */
+function updateSortDir() {
+  const b = $("sortDir");
+  b.classList.toggle("desc", browseSort.dir === "desc");
+  b.setAttribute("aria-label", `${t("browser.sortBy")}: ${t(browseSort.dir === "desc" ? "sort.desc" : "sort.asc")}`);
+}
 
 function updateHome() {
   const home = !isActive();
@@ -459,6 +649,7 @@ async function loadBrowse(p = browse.path) {
     d = await api(`/api/browse${p ? `?path=${encodeURIComponent(p)}` : ""}`);
   } catch {
     if (p && seq === browse.seq) loadBrowse(null); // folder gone, removed or excluded: back to the top
+    else hideBoot();
     return;
   }
   if (seq !== browse.seq) return;
@@ -472,6 +663,14 @@ async function loadBrowse(p = browse.path) {
 
 function renderBrowse() {
   const d = browse.data;
+  hideBoot();
+  updateSelectAll();
+  // the browser also re-renders while hidden behind search results (a late listing, a language change):
+  // the selection then belongs to the results, so leave it alone
+  if (!isActive()) {
+    syncSelection(`folder ${d.path}`);
+    keepSelected(d.files.slice(0, browse.shown).filter((f) => f.indexed)); // only what is on screen (e.g. after re-sorting)
+  }
   const crumbs = $("crumbs");
   crumbs.innerHTML = "";
   const crumb = (label, p, current) => {
@@ -501,6 +700,10 @@ function renderBrowse() {
     b.title = dir.path;
     b.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg><span class="dn">${esc(dir.name)}</span><span class="dc">${num(dir.count)}</span>`;
     b.onclick = () => loadBrowse(dir.path);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      openMenu(e, [{ label: t("menu.revealFolder"), run: () => window.mmf.revealFolder(dir.path).catch((err) => toast(`Can't open: ${ipcMessage(err)}`)) }]);
+    };
     dirs.appendChild(b);
   }
 
@@ -827,6 +1030,7 @@ function applyLanguage(code) {
   const platform = window.mmf?.platform;
   $("vReveal").textContent = t(platform === "darwin" ? "viewer.revealMac" : platform === "win32" ? "viewer.revealWin" : "viewer.revealLinux");
   $("langSelect").value = lang;
+  updateSortDir();
   updatePlaceholder();
   renderExamples();
   renderRecent();
@@ -929,7 +1133,7 @@ $("stopIndex").onclick = async () => { await post("/api/stop"); toast(t("toast.s
 let lastDone = -1, wasRunning = false, lastStatus = null;
 async function refreshStatus() {
   let s;
-  try { s = await api("/api/status"); } catch { $("status").textContent = "Can't connect to the engine"; return; }
+  try { s = await api("/api/status"); } catch { $("status").textContent = "Can't connect to the engine"; hideBoot(); return; }
   const { progress: p, folders, stats } = s;
   lastStatus = s;
   state.progress = p;
@@ -937,6 +1141,7 @@ async function refreshStatus() {
   updateOcrPendingNote();
   if (p.ocr?.running) refreshViewerOcr();
   state.hasIndex = stats.images + stats.videos > 0;
+  if (!state.hasIndex) hideBoot(); // otherwise the folder listing replaces the placeholders
   $("welcome").classList.toggle("hidden", folders.length > 0);
   updateHome();
   renderStatus(s);

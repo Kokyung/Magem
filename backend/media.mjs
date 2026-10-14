@@ -96,6 +96,13 @@ export function loadRaw(input, maxSide) {
   });
 }
 
+/** The whole picture, upright and with its transparency, as a PNG for the clipboard (long edge capped). */
+export function clipboardPng(input, maxSide = 8192) {
+  return withFallback(input, (src) => sharp(src, { failOn: "none", animated: false }).rotate()
+    .resize(maxSide, maxSide, { fit: "inside", withoutEnlargement: true })
+    .png({ compressionLevel: 1 }).toBuffer());
+}
+
 async function withFallback(input, fn) {
   try {
     return await fn(input);

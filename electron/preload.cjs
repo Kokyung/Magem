@@ -12,4 +12,8 @@ contextBridge.exposeInMainWorld("mmf", {
   onOpenSettings: (callback) => ipcRenderer.on("open-settings", () => callback()),
   reveal: (id) => ipcRenderer.invoke("reveal", id),
   openFile: (id) => ipcRenderer.invoke("open-file", id),
+  revealFolder: (dir) => ipcRenderer.invoke("reveal-folder", String(dir)),
+  copyImage: (id) => ipcRenderer.invoke("copy-image", id),
+  copyFiles: (ids) => ipcRenderer.invoke("copy-files", ids),
+  copyPaths: (ids) => ipcRenderer.invoke("copy-paths", ids),
 });

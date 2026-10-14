@@ -1,8 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import os from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, "models") : path.join(APP_ROOT, "models");
@@ -296,7 +297,11 @@ ipcMain.handle("set-tray-labels", (_e, labels) => {
 function loginItem() {
   if (!LOGIN_ITEM_PLATFORM || !app.isPackaged) return { enabled: false, hidden: null };
   const hidden = TRAY_PLATFORM ? app.getLoginItemSettings({ args: [HIDDEN_ARG] }).openAtLogin : null;
-  return { enabled: hidden === true || app.getLoginItemSettings().openAtLogin, hidden };
+  const settings = app.getLoginItemSettings();
+  // Windows: the Run entry stays when the user turns Magem off in Startup Apps / Task Manager,
+  // so ask whether it will really launch (with any arguments)
+  const enabled = IS_WIN ? settings.executableWillLaunchAtLogin : hidden === true || settings.openAtLogin;
+  return { enabled, hidden };
 }
 
 ipcMain.handle("get-app-settings", () => ({
@@ -329,13 +334,30 @@ function reviveWindow(why) {
   if (win && !win.isDestroyed() && win.webContents.isCrashed()) reloadWindow?.(`renderer gone at ${why}`);
 }
 
+/** POST to the engine with the auth cookie; throws the engine's own error message on failure. */
+async function engine(apiPath, body) {
+  const res = await fetch(`${baseUrl}${apiPath}`, {
+    method: "POST", headers: { cookie: `mmf=${TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `engine error ${res.status}`);
+  return res;
+}
+
 /** Resolve an indexed file id to its path via the engine, so the renderer can't ask us to open arbitrary paths. */
 async function indexedPath(id) {
-  const res = await fetch(`${baseUrl}/api/file`, {
-    method: "POST", headers: { cookie: `mmf=${TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify({ id }),
-  });
-  if (!res.ok) throw new Error("file not found");
-  return (await res.json()).path;
+  return (await (await engine("/api/file", { id })).json()).path;
+}
+/** Many ids in one request (a select-all can cover thousands of files). */
+const MAX_FILES = 10000; // the engine enforces the same limit; checked here too so a huge list never gets sent
+async function indexedPaths(ids) {
+  if (!Array.isArray(ids) || !ids.length || ids.length > MAX_FILES) throw new Error("Select between 1 and 10,000 files");
+  return (await (await engine("/api/paths", { ids })).json()).paths;
+}
+
+/** Put files themselves on the clipboard, so pasting in Finder / File Explorer copies them. */
+function copyFilesToClipboard(paths) {
+  // Electron turns a URI list into the platform's own file list (file URLs on macOS, a file drop list on Windows)
+  return clipboard.write([new ClipboardItem({ "text/uri-list": paths.map((p) => pathToFileURL(p).href).join("\r\n") })]);
 }
 
 // the title arrives already translated by the page; it is only ever shown as text
@@ -347,6 +369,15 @@ ipcMain.handle("pick-folders", async (_e, title) => {
   return r.canceled ? [] : r.filePaths;
 });
 ipcMain.handle("reveal", async (_e, id) => shell.showItemInFolder(await indexedPath(id)));
+// folders come from the page, so the engine first checks they are inside an indexed folder
+ipcMain.handle("reveal-folder", async (_e, dir) => shell.showItemInFolder((await (await engine("/api/folder", { path: dir })).json()).path));
+ipcMain.handle("copy-image", async (_e, id) => {
+  // decoded by the engine: HEIC and other formats the OS can't read, and EXIF rotation applied
+  const png = await (await engine("/api/clipboard_image", { id })).arrayBuffer();
+  await clipboard.write([new ClipboardItem({ "image/png": new Blob([png], { type: "image/png" }) })]);
+});
+ipcMain.handle("copy-paths", async (_e, ids) => { await clipboard.writeText((await indexedPaths(ids)).join(os.EOL)); });
+ipcMain.handle("copy-files", async (_e, ids) => { await copyFilesToClipboard(await indexedPaths(ids)); });
 ipcMain.handle("open-file", async (_e, id) => {
   const err = await shell.openPath(await indexedPath(id));
   if (err) throw new Error(err);

@@ -665,6 +665,15 @@ export class Index {
    * files in it. Without a path, the indexed folders themselves. Only paths inside indexed folders are
    * listed, with the scanner's skip rules (hidden, excluded, …) applied.
    */
+  /** The indexed folder `dir` belongs to; throws unless `dir` is inside one and not excluded. */
+  browsableRoot(dir, roots = this.db.prepare("SELECT path FROM folders").all().map((r) => r.path)) {
+    if (typeof dir !== "string" || !dir) throw badRequest("Only folders inside indexed folders can be browsed");
+    const root = roots.find((r) => r.normalize("NFC") === dir.normalize("NFC") || isInside(dir, r));
+    const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
+    if (!root || excluded.has(dir.normalize("NFC")) || this._isExcluded(dir)) throw badRequest("Only folders inside indexed folders can be browsed");
+    return root;
+  }
+
   async browse(dir) {
     const roots = this.db.prepare("SELECT path FROM folders ORDER BY added_at").all().map((r) => r.path);
     // indexed paths are root + names as read from disk, the same form `dir` arrives in (it comes from an
@@ -682,9 +691,8 @@ export class Index {
       }));
       return { path: null, root: null, dirs, files: [] };
     }
-    const root = roots.find((r) => r.normalize("NFC") === dir.normalize("NFC") || isInside(dir, r));
+    const root = this.browsableRoot(dir, roots);
     const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
-    if (!root || excluded.has(dir.normalize("NFC")) || this._isExcluded(dir)) throw badRequest("Only folders inside indexed folders can be browsed");
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
 
     // indexed files per immediate subfolder, in one pass over the index
