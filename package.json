@@ -1,7 +1,7 @@
 {
   "name": "magem",
   "productName": "Magem",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "EmbeddingGemma 2로 사진·동영상을 말로 찾는 로컬 검색 앱",
   "author": "Kokyung Byun",
   "license": "Apache-2.0",
