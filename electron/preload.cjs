@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld("mmf", {
   pickFolders: (title) => ipcRenderer.invoke("pick-folders", String(title || "")),
   setTheme: (theme) => ipcRenderer.invoke("set-theme", theme),
   getAppSettings: () => ipcRenderer.invoke("get-app-settings"),
-  setOpenAtLogin: (on) => ipcRenderer.invoke("set-open-at-login", on === true),
+  setOpenAtLogin: (on, hidden) => ipcRenderer.invoke("set-open-at-login", on === true, hidden === true),
   setRunInBackground: (on) => ipcRenderer.invoke("set-run-in-background", on === true),
   setTrayLabels: (labels) => ipcRenderer.invoke("set-tray-labels", labels),
   onOpenSettings: (callback) => ipcRenderer.on("open-settings", () => callback()),

@@ -28,8 +28,9 @@ const MIME = {
 };
 
 // UI settings the page stores here: its address (a random port) changes every launch, so the browser's
-// own storage would start empty each time
-const PREF_KEYS = new Set(["mmf.recent", "mmf.view", "mmf.browse", "mmf.lang", "mmf.theme", "mmf.browseSort", "mmf.background"]);
+// own storage would start empty each time. The tray keys are the Electron main process's own.
+const PREF_KEYS = new Set(["mmf.recent", "mmf.view", "mmf.browse", "mmf.lang", "mmf.theme", "mmf.browseSort", "mmf.background",
+  "mmf.trayLabels", "mmf.trayNotice"]);
 
 const IMAGE_FETCH_LIMIT = 25 << 20;
 

@@ -34,7 +34,7 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "app.mymemoryfinder",
+    "appId": "app.kokyung.magem",
     "productName": "Magem",
     "directories": {
       "output": "dist",

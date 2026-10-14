@@ -141,9 +141,18 @@
         <option value="dark" data-i18n="theme.dark"></option>
       </select>
     </label>
-    <label class="setting-check hidden" id="startupRow">
-      <input type="checkbox" id="startupCheck"> <span data-i18n="settings.startup"></span>
-    </label>
+    <div class="hidden" id="startupRow">
+      <label class="setting-check">
+        <input type="checkbox" id="startupCheck"> <span data-i18n="settings.startup"></span>
+      </label>
+      <p class="muted small setting-note hidden" id="startupNote" data-i18n="settings.startupUnavailable"></p>
+      <div class="setting-sub hidden" id="startHiddenRow">
+        <label class="setting-check">
+          <input type="checkbox" id="startHiddenCheck" checked> <span data-i18n="settings.startHidden"></span>
+        </label>
+        <p class="muted small setting-note" data-i18n="settings.startHiddenNote"></p>
+      </div>
+    </div>
     <div class="hidden" id="backgroundRow">
       <label class="setting-check">
         <input type="checkbox" id="backgroundCheck"> <span data-i18n="settings.background"></span>

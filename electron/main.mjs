@@ -16,15 +16,32 @@ let quitting = false;
 let mainLog = null;
 let reloadWindow = null; // set per window by watchRenderer
 let windowLoading = null; // a createWindow() still in progress, so a second "open" waits for the same window
-let started = false;      // the first window is on its way: before that, nothing may open another one
+let started = false;      // startup is done (the first window is on its way, unless started in the background): before that, nothing may open another one
 
-// Windows: closing the window can leave the app running in the system tray, so indexing carries on
+// Windows: closing the window can leave the app running in the system tray, so indexing carries on.
+// Not for a development build on the shared data folder: left in the tray it would keep that folder's
+// single-instance lock, and launching the installed app would only bring back the development window.
 const IS_WIN = process.platform === "win32";
+const TRAY_PLATFORM = IS_WIN && (app.isPackaged || !!process.env.MMF_DEV_DATA);
 let runInBackground = true;
 let tray = null;
-let trayLabels = { open: "Open Magem", settings: "Settings", quit: "Quit" }; // replaced by the page's language
+let trayImage = null;
+let trayNoticeShown = false; // the one-time "still running in the tray" notice, saved as mmf.trayNotice
+let trayLabels = { // replaced by the page's language
+  open: "Open Magem", settings: "Settings", quit: "Quit",
+  notice: "Magem is still running in the system tray and keeps indexing. To quit, use the tray icon’s menu.",
+};
 // login items only make sense for the installed app: in development they would register the bare Electron binary
 const LOGIN_ITEM_PLATFORM = process.platform === "darwin" || IS_WIN;
+// the login item's argument for "Start in the background": the app then stays in the tray, without even
+// loading its window, until asked for it. Windows only — macOS login items take no arguments.
+const HIDDEN_ARG = "--background";
+const START_HIDDEN = TRAY_PLATFORM && process.argv.includes(HIDDEN_ARG);
+
+// the installer's shortcuts carry package.json's build.appId: the same id keeps the window on the pinned
+// taskbar icon, and it also names the login item in the registry (the uninstaller removes it by that name)
+const APP_ID = "app.kokyung.magem";
+if (IS_WIN) app.setAppUserModelId(APP_ID);
 
 /** Lifecycle events worth keeping across launches (renderer/GPU deaths, sleep/wake) for diagnosis. */
 function logMain(message) {
@@ -33,10 +50,13 @@ function logMain(message) {
 
 // dev-only: point an unpackaged build at a scratch data folder
 if (!app.isPackaged && process.env.MMF_DEV_DATA) app.setPath("userData", process.env.MMF_DEV_DATA);
+// a second launch only hands over to the running app ("second-instance") and quits: whenReady still
+// fires for it, so it must not go on to touch the data folder, the logs or start a second engine
+const primary = app.requestSingleInstanceLock();
+if (!primary) app.quit();
 // false when the old app still holds its data: starting anyway would create an empty index here and
 // strand the old one for good, so the app asks the user to quit the old one instead (see whenReady)
-const migrated = app.isPackaged || !process.env.MMF_DEV_DATA ? migrateDataDir() : true;
-if (!app.requestSingleInstanceLock()) app.quit();
+const migrated = primary && (app.isPackaged || !process.env.MMF_DEV_DATA) ? migrateDataDir() : true;
 
 /**
  * The app was called MyMemoryFinder, and its data folder is named after the app. On the first launch
@@ -195,7 +215,15 @@ async function applySavedPrefs() {
     const prefs = await res.json();
     if (THEMES.has(prefs["mmf.theme"])) nativeTheme.themeSource = prefs["mmf.theme"];
     runInBackground = prefs["mmf.background"] !== false;
+    trayNoticeShown = prefs["mmf.trayNotice"] === true;
+    applyTrayLabels(prefs["mmf.trayLabels"]);
   } catch { /* defaults */ }
+}
+
+function savePref(key, value) {
+  fetch(`${baseUrl}/api/prefs`, {
+    method: "POST", headers: { cookie: `mmf=${TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify({ key, value }),
+  }).catch((e) => logMain(`saving ${key} failed: ${e.message}`));
 }
 
 /** Bring the window back (recreating it if it was closed), optionally opening the settings panel. */
@@ -219,7 +247,7 @@ function loadWindow() {
 }
 
 function createTray() {
-  const logo = nativeImage.createFromPath(path.join(APP_ROOT, "static", "logo.png"));
+  const logo = trayImage = nativeImage.createFromPath(path.join(APP_ROOT, "static", "logo.png"));
   const icon = nativeImage.createEmpty();
   for (const scaleFactor of [1, 1.25, 1.5, 2]) {
     icon.addRepresentation({ scaleFactor, buffer: logo.resize({ width: Math.round(16 * scaleFactor), quality: "best" }).toPNG() });
@@ -238,27 +266,51 @@ function updateTrayMenu() {
   ]));
 }
 
+/** The first time closing the window leaves the app in the tray, say so — people would think it quit. */
+function showTrayNotice() {
+  if (trayNoticeShown) return;
+  trayNoticeShown = true;
+  tray.displayBalloon({ title: "Magem", content: trayLabels.notice, icon: trayImage, noSound: true });
+  savePref("mmf.trayNotice", true);
+}
+
+/** Take text the page translated (only plain strings, only ever shown as text); true if any changed. */
+function applyTrayLabels(labels) {
+  let changed = false;
+  for (const key of Object.keys(trayLabels)) {
+    const text = typeof labels?.[key] === "string" && labels[key].trim() ? labels[key].slice(0, 250) : null;
+    if (text && text !== trayLabels[key]) { trayLabels[key] = text; changed = true; }
+  }
+  return changed;
+}
+ipcMain.handle("set-tray-labels", (_e, labels) => {
+  if (!applyTrayLabels(labels) || !TRAY_PLATFORM) return;
+  updateTrayMenu();
+  savePref("mmf.trayLabels", trayLabels); // a start in the background has no page to translate them
+});
+
+/**
+ * The login item as the OS has it. `hidden`: registered with HIDDEN_ARG (null where that isn't offered).
+ * Windows matches the registered command line exactly, so each variant is asked for separately.
+ */
+function loginItem() {
+  if (!LOGIN_ITEM_PLATFORM || !app.isPackaged) return { enabled: false, hidden: null };
+  const hidden = TRAY_PLATFORM ? app.getLoginItemSettings({ args: [HIDDEN_ARG] }).openAtLogin : null;
+  return { enabled: hidden === true || app.getLoginItemSettings().openAtLogin, hidden };
+}
+
 ipcMain.handle("get-app-settings", () => ({
-  openAtLogin: {
-    shown: LOGIN_ITEM_PLATFORM,
-    available: LOGIN_ITEM_PLATFORM && app.isPackaged,
-    enabled: LOGIN_ITEM_PLATFORM && app.isPackaged && app.getLoginItemSettings().openAtLogin,
-  },
-  runInBackground: IS_WIN ? runInBackground : null, // other platforms: not offered
+  openAtLogin: { shown: LOGIN_ITEM_PLATFORM, available: LOGIN_ITEM_PLATFORM && app.isPackaged, ...loginItem() },
+  runInBackground: TRAY_PLATFORM ? runInBackground : null, // other platforms and dev builds: not offered
 }));
-ipcMain.handle("set-open-at-login", (_e, on) => {
-  if (!LOGIN_ITEM_PLATFORM || !app.isPackaged) return false;
-  app.setLoginItemSettings({ openAtLogin: on === true });
-  return app.getLoginItemSettings().openAtLogin; // what the OS actually accepted
+ipcMain.handle("set-open-at-login", (_e, on, hidden) => {
+  if (LOGIN_ITEM_PLATFORM && app.isPackaged) {
+    // registering again under the same name replaces the arguments
+    app.setLoginItemSettings({ openAtLogin: on === true, ...(TRAY_PLATFORM && { args: hidden === true ? [HIDDEN_ARG] : [] }) });
+  }
+  return loginItem(); // what the OS actually accepted
 });
 ipcMain.handle("set-run-in-background", (_e, on) => { runInBackground = on === true; });
-// menu text arrives already translated by the page; only plain strings are used, as labels
-ipcMain.handle("set-tray-labels", (_e, labels) => {
-  for (const key of Object.keys(trayLabels)) {
-    if (typeof labels?.[key] === "string" && labels[key].trim()) trayLabels[key] = labels[key].slice(0, 100);
-  }
-  updateTrayMenu();
-});
 
 // the page drives the theme; nativeTheme also flips prefers-color-scheme for its CSS
 ipcMain.handle("set-theme", (_e, theme) => {
@@ -301,6 +353,7 @@ ipcMain.handle("open-file", async (_e, id) => {
 });
 
 app.whenReady().then(async () => {
+  if (!primary) return;
   if (!migrated) {
     dialog.showMessageBoxSync({
       type: "info", title: "Magem",
@@ -343,7 +396,13 @@ app.whenReady().then(async () => {
     baseUrl = `http://127.0.0.1:${port}`;
     await setAuthCookie();
     await applySavedPrefs();
-    if (IS_WIN) createTray();
+    if (TRAY_PLATFORM) createTray();
+    if (START_HIDDEN) {
+      // opened at login to run in the tray: the window is loaded when asked for (tray, second launch)
+      logMain("started in the background");
+      started = true;
+      return;
+    }
     windowLoading = loadWindow(); // not showWindow(): a failure here should end in the error dialog below
     started = true;
     await windowLoading;
@@ -359,7 +418,10 @@ app.on("activate", () => {
 });
 app.on("window-all-closed", () => {
   if (process.platform === "darwin") return;
-  if (IS_WIN && tray && runInBackground && !quitting) return; // keeps indexing; reopened from the tray
+  if (TRAY_PLATFORM && tray && runInBackground && !quitting) { // keeps indexing; reopened from the tray
+    showTrayNotice();
+    return;
+  }
   app.quit();
 });
 app.on("before-quit", () => {

@@ -833,7 +833,8 @@ function applyLanguage(code) {
   render();
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
   if (lastStatus) renderStatus(lastStatus);
-  window.mmf?.setTrayLabels?.({ open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit") });
+  // once the saved language is known: the main process keeps these for a start without a window
+  if (prefsLoaded) window.mmf?.setTrayLabels?.({ open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice") });
 }
 
 for (const [code, name] of LANGUAGES) $("langSelect").add(new Option(name, code));
@@ -843,20 +844,34 @@ $("themeSelect").onchange = (e) => {
   window.mmf?.setTheme(e.target.value); // the main process switches the page's light/dark preference
 };
 
-/** Startup and background options live in the main process (the OS login item, the tray), so ask it. */
+/**
+ * Startup and background options live in the main process (the OS login item, the tray), so ask it.
+ * Called straight away rather than with the saved settings, which wait for the engine's model loading.
+ */
 async function loadAppSettings() {
   let s;
   try { s = await window.mmf.getAppSettings(); } catch { return; }
-  $("startupRow").classList.toggle("hidden", !s.openAtLogin.shown);
-  $("startupCheck").disabled = !s.openAtLogin.available; // development build: nothing to register
-  $("startupCheck").checked = s.openAtLogin.enabled;
+  const login = s.openAtLogin;
+  $("startupRow").classList.toggle("hidden", !login.shown);
+  $("startupCheck").disabled = !login.available; // development build: nothing to register
+  $("startupNote").classList.toggle("hidden", login.available);
+  showLoginItem(login);
   $("backgroundRow").classList.toggle("hidden", s.runInBackground == null);
   $("backgroundCheck").checked = !!s.runInBackground;
 }
-$("startupCheck").onchange = async (e) => {
-  try { e.target.checked = await window.mmf.setOpenAtLogin(e.target.checked); }
-  catch (err) { e.target.checked = !e.target.checked; toast(`Couldn't change the startup setting: ${err.message}`); }
-};
+/** The login item as the OS has it; "Start in the background" belongs to it, so only shows while it's on. */
+function showLoginItem({ enabled, hidden }) {
+  $("startupCheck").checked = enabled;
+  $("startHiddenRow").classList.toggle("hidden", !enabled || hidden == null);
+  if (enabled && hidden != null) $("startHiddenCheck").checked = hidden; // while off, keep the choice for next time
+}
+async function setLoginItem(on) {
+  try { showLoginItem(await window.mmf.setOpenAtLogin(on, $("startHiddenCheck").checked)); }
+  catch (err) { toast(`Couldn't change the startup setting: ${err.message}`); loadAppSettings(); }
+}
+$("startupCheck").onchange = (e) => setLoginItem(e.target.checked);
+$("startHiddenCheck").onchange = () => setLoginItem(true);
+loadAppSettings();
 $("backgroundCheck").onchange = (e) => {
   store.set("mmf.background", e.target.checked);
   window.mmf.setRunInBackground(e.target.checked);
@@ -1013,7 +1028,6 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   prefsLoaded = true;
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
-  loadAppSettings();
   state.view = store.get("mmf.view", "image") === "text" ? "text" : "image";
   $("viewSelect").value = state.view;
   readBrowseSort();
