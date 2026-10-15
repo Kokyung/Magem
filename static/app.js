@@ -1502,9 +1502,47 @@ function renderStatus(s) {
     ex.appendChild(li);
   });
   $("statsLine").textContent = t("stats.line", { vectors: num(stats.vectors), engine: engLabel });
-  $("errorsBox").classList.toggle("hidden", !stats.errors.length);
-  $("errors").innerHTML = stats.errors.map((e) => `<li><b>${esc(e.path.split(/[\\/]/).pop())}</b><br>${esc(e.error || "")}</li>`).join("");
+  renderErrors(stats.errors);
 }
+
+/** Files that couldn't be processed: each can be shown in its folder or taken off the list. */
+let errorsKey = "";
+function renderErrors(errors) {
+  $("errorsBox").classList.toggle("hidden", !errors.length);
+  // rebuilt only when it changes: the status comes every 1.5 s, and a rebuild could swallow a click
+  const key = `${lang}\n${errors.map((e) => `${e.id} ${e.error}`).join("\n")}`;
+  if (key === errorsKey) return;
+  errorsKey = key;
+  const platform = window.mmf?.platform;
+  const ul = $("errors");
+  ul.innerHTML = "";
+  for (const e of errors) {
+    const li = document.createElement("li");
+    li.innerHTML = `<div class="err-text"><b>${esc(e.path.split(/[\\/]/).pop())}</b><br>${esc(e.error || "")}</div>`;
+    if (window.mmf?.reveal) {
+      const reveal = document.createElement("button");
+      reveal.className = "icon-btn";
+      reveal.title = t(platform === "darwin" ? "viewer.revealMac" : platform === "win32" ? "viewer.revealWin" : "viewer.revealLinux");
+      reveal.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
+      reveal.onclick = () => window.mmf.reveal(e.id).catch((err) => toast(`Can't open: ${ipcMessage(err)}`));
+      li.appendChild(reveal);
+    }
+    const hide = document.createElement("button");
+    hide.className = "icon-btn";
+    hide.title = t("errors.hide");
+    hide.textContent = "×";
+    hide.onclick = async () => {
+      await post("/api/errors/hide", { ids: [e.id] }).catch((err) => toast(err.message));
+      refreshStatus();
+    };
+    li.appendChild(hide);
+    ul.appendChild(li);
+  }
+}
+$("clearErrors").onclick = async () => {
+  await post("/api/errors/hide", {}).catch((err) => toast(err.message));
+  refreshStatus();
+};
 const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.cpu" };
 
 (async () => {

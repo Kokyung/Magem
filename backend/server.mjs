@@ -12,8 +12,8 @@ import { checkIndexDb } from "./db-check.mjs";
 const MIN_RELEVANCE = 40;
 const relevance = (scale) => ({ percentOf: (score) => toPercent(score, scale), minPercent: MIN_RELEVANCE });
 
-// file and folder names are text-to-text matches (plus keywords), which run hotter than text-to-image ones,
-// so they use their own percent scale
+// file and folder names that contain the query's words, ordered by keywords plus text-to-text meaning,
+// which run hotter than text-to-image matches, so they use their own percent scale
 const NAMES = { modalities: new Set(["name"]), ...relevance("section") };
 
 const MIME = {
@@ -166,7 +166,7 @@ export function createServer({ index, staticDir, token, modelName }) {
           // one of them; the first request gets both, the names one at its own (smaller) page size.
           const params = searchParams(q);
           const section = q.get("section");
-          const { ids: nameIds, ...names } = index.rank(d, index.withKeywords(d, scores, text), {
+          const { ids: nameIds, ...names } = index.rank(d, index.nameScores(d, scores, text), {
             ...params, ...NAMES, withIds: true,
             ...(section === "name" ? {} : { offset: 0, limit: Math.min(+(q.get("nameLimit") || params.limit), 500) }),
           });
@@ -223,6 +223,11 @@ export function createServer({ index, staticDir, token, modelName }) {
         if (p === "/api/reindex") return json(res, { started: index.startAuto() }); // coming back to the window
         if (p === "/api/pause") { index.pause(); return json(res, { ok: true }); }
         if (p === "/api/resume") return json(res, { started: index.resume() });
+        if (p === "/api/errors/hide") { // ids: some failed files; none: all of them
+          if (body.ids != null && (!Array.isArray(body.ids) || body.ids.length > 10000)) return json(res, { error: "ids: send at most 10,000" }, 400);
+          index.hideErrors(body.ids?.map(Number).filter(Number.isInteger) ?? null);
+          return json(res, { ok: true });
+        }
         if (p === "/api/file") {
           const row = index.file(+body.id);
           return row ? json(res, row) : json(res, { error: "not found" }, 404);

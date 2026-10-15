@@ -19,6 +19,8 @@ const AUDIO_MIN_DBFS = -45.0; // quieter chunks are skipped (silence matches eve
 const EMBED_BATCH = 4;
 const WORKERS = 3;
 const NAME_BATCH = 32;
+// during the media pass, new files' names are embedded at least this often (search reloads every 10 s too)
+const NAME_CATCH_UP_MS = 10000;
 // Seconds of work per file (one worker), used for the time-left estimate before a run has measured its own.
 // Videos take far longer than photos, which is why they are counted apart. Replaced by real measurements,
 // which are kept across runs.
@@ -133,6 +135,8 @@ export class Index {
     if (!cols("files").includes("ocr_done")) this.db.exec("ALTER TABLE files ADD COLUMN ocr_done INTEGER DEFAULT 0");
     // when the photo or video was taken (ms; the file's modified time when it doesn't say); NULL = not read yet
     if (!cols("files").includes("taken_at")) this.db.exec("ALTER TABLE files ADD COLUMN taken_at REAL");
+    // a failed file the user took off the "couldn't be processed" list (see hideErrors)
+    if (!cols("files").includes("error_hidden")) this.db.exec("ALTER TABLE files ADD COLUMN error_hidden INTEGER DEFAULT 0");
     if (!cols("vectors").includes("text")) this.db.exec("ALTER TABLE vectors ADD COLUMN text TEXT");
     this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle" };
     // text recognition (PaddleOCR) was removed: its entries no longer have anything to answer
@@ -145,6 +149,9 @@ export class Index {
     this._eta = null; // the estimate last shown, and when: { at, value }
     this._stop = false;
     this._running = null;
+    this._newNames = []; // files this run indexed whose names aren't embedded yet: { id, path, folder, thumb }
+    this._namesBusy = null; // a _catchUpNames() batch in progress
+    this._namesAt = 0; // when the last one ended
     this._matrix = null;
     this._dirty = true;
     this._anchor = null;
@@ -377,9 +384,12 @@ export class Index {
   }
 
   _needsWork(it) {
-    const row = this.db.prepare("SELECT mtime, size, status FROM files WHERE path=?").get(it.path);
+    const row = this.db.prepare("SELECT mtime, size, status, error_hidden FROM files WHERE path=?").get(it.path);
     // the Python version stored float seconds; compare with a little slack
-    return !row || Math.abs(row.mtime - it.mtime) > 1e-3 || row.size !== it.size || row.status !== "done";
+    const changed = !row || Math.abs(row.mtime - it.mtime) > 1e-3 || row.size !== it.size;
+    // a failure taken off the list is only tried again once the file changes
+    if (!changed && row.status === "error" && row.error_hidden) return false;
+    return changed || row.status !== "done";
   }
 
   async _runIndex() {
@@ -402,6 +412,8 @@ export class Index {
         pr.phase = "indexing";
       }
       let next = 0;
+      this._newNames = [];
+      this._namesAt = Date.now();
       const worker = async () => {
         while (!this._stop && next < todo.length) {
           const it = todo[next++];
@@ -410,10 +422,13 @@ export class Index {
           this._measure(it.kind, Date.now() - t0);
           this._left[it.kind]--;
           pr.done++;
+          this._catchUpNames(); // not awaited: the names wait in the model's queue, not this worker
         }
       };
       await Promise.all(Array.from({ length: WORKERS }, worker));
-      if (!this._stop) await this._enrichNames();
+      // also when stopped or paused: what was indexed can then be found by name too
+      await this._catchUpNames({ all: true });
+      if (!this._stop) await this._enrichNames(); // any whose batch failed above
       // a run that got to the end (not stopped): when the index was last complete, shown in the status line
       if (!this._stop) this.setPref("index.lastRun", { finishedAt: Date.now() });
     } catch (e) {
@@ -488,6 +503,7 @@ export class Index {
         const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec) VALUES (?,?,?,?,?,?)");
         for (const v of vecs) ins.run(fid, v.modality, v.t, v.tEnd, v.thumb, vecBlob(v.vec));
         this.db.exec("COMMIT");
+        this._newNames.push({ id: fid, path: it.path, folder: it.folder, thumb });
       } catch (e) {
         this.db.exec("ROLLBACK");
         throw e;
@@ -499,7 +515,7 @@ export class Index {
       this.progress.errors++;
       this.db.prepare(
         `INSERT INTO files (path, kind, folder, mtime, size, status, error, indexed_at) VALUES (?,?,?,?,?,'error',?,?)
-         ON CONFLICT(path) DO UPDATE SET status='error', error=excluded.error, mtime=excluded.mtime, size=excluded.size`,
+         ON CONFLICT(path) DO UPDATE SET status='error', error=excluded.error, mtime=excluded.mtime, size=excluded.size, error_hidden=0`,
       ).run(it.path, it.kind, it.folder, it.mtime, it.size, String(e.message).slice(0, 500), Date.now() / 1000);
     }
   }
@@ -627,25 +643,62 @@ export class Index {
     };
   }
 
+  /** The "names" phase: every indexed file still without a name vector (those indexed before, mostly). */
   async _enrichNames() {
     const todo = this.db.prepare("SELECT id, path, folder, thumb FROM files WHERE status='done' AND name_done=0").all();
     if (!todo.length) return;
     const pr = this.progress;
     Object.assign(pr, { phase: "names", total: todo.length, done: 0, current: "" });
     await embedder.load();
+    for (let i = 0; i < todo.length && !this._stop; i += NAME_BATCH) {
+      const batch = todo.slice(i, i + NAME_BATCH);
+      await this._embedNames(batch);
+      pr.done += batch.length;
+    }
+  }
+
+  /**
+   * Names of the files this run has just indexed, while the media pass goes on: a batch once NAME_BATCH
+   * have piled up or NAME_CATCH_UP_MS have passed, so a file can be found by its name or folder shortly
+   * after it is indexed rather than only once the whole run is over. Leaves the progress shown alone.
+   * all: everything left, also after a stop or pause (it's a few seconds at most), and a run in progress
+   * is waited for.
+   */
+  async _catchUpNames({ all = false } = {}) {
+    if (this._namesBusy) {
+      if (!all) return;
+      await this._namesBusy;
+    }
+    const due = this._newNames.length >= NAME_BATCH || Date.now() - this._namesAt >= NAME_CATCH_UP_MS;
+    if (!this._newNames.length || (!all && !due)) return;
+    this._namesBusy = (async () => {
+      do await this._embedNames(this._newNames.splice(0, NAME_BATCH));
+      while (all && this._newNames.length);
+    })()
+      // left with name_done=0: the next run's names phase picks them up
+      .catch(() => {})
+      .finally(() => { this._namesBusy = null; this._namesAt = Date.now(); });
+    return this._namesBusy;
+  }
+
+  /** Embed and store the names of these indexed files ({ id, path, folder, thumb }). */
+  async _embedNames(files) {
+    const batch = files.map((f) => ({ ...f, ...nameDoc(f.path, f.folder) }));
+    const t0 = Date.now();
+    const vecs = await embedder.embedDocs(batch.map((b) => b.doc));
+    this._measure("name", (Date.now() - t0) / batch.length);
+    // a file deleted or re-indexed meanwhile gets nothing (its new row is queued again)
     const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec, text) SELECT ?, 'name', NULL, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM files WHERE id=?)");
     const mark = this.db.prepare("UPDATE files SET name_done=1 WHERE id=?");
-    for (let i = 0; i < todo.length && !this._stop; i += NAME_BATCH) {
-      const batch = todo.slice(i, i + NAME_BATCH).map((f) => ({ ...f, ...nameDoc(f.path, f.folder) }));
-      const t0 = Date.now();
-      const vecs = await embedder.embedDocs(batch.map((b) => b.doc));
-      this._measure("name", (Date.now() - t0) / batch.length);
-      this.db.exec("BEGIN");
+    this.db.exec("BEGIN");
+    try {
       batch.forEach((f, k) => { ins.run(f.id, f.thumb, vecBlob(vecs[k]), f.display, f.id); mark.run(f.id); });
       this.db.exec("COMMIT");
-      pr.done += batch.length;
-      this._dirty = true;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
     }
+    this._dirty = true;
   }
 
   // ---------- search ----------
@@ -697,20 +750,24 @@ export class Index {
   }
 
   /**
-   * Add a keyword component to name scores: the share of query words (2+ characters) found in the
-   * text. Semantic similarity alone under-rates exact words buried in long recognized text.
+   * Scores for the "file & folder names" list: only names that contain the query's words (2+ characters;
+   * a query of only shorter ones uses those) take part; the rest get -Infinity, which rank() skips.
+   * Meaning alone ("김치볶음밥" for "음식") is left to the search by what the files show. Among the names
+   * that do contain them, the share of words found (more for the file's own name) and closeness in
+   * meaning set the order.
    */
-  withKeywords(d, scores, query) {
-    const words = [...new Set(query.split(/\s+/).map(normText).filter((w) => w.length >= 2))];
-    if (!words.length) return scores;
-    const out = Float32Array.from(scores);
-    for (let i = 0; i < d.n; i++) {
+  nameScores(d, scores, query) {
+    const all = [...new Set(query.split(/\s+/).map(normText).filter(Boolean))];
+    const long = all.filter((w) => w.length >= 2);
+    const words = long.length ? long : all;
+    const out = new Float32Array(d.n).fill(-Infinity);
+    for (let i = 0; i < d.n && words.length; i++) {
       const t = d.norm[i];
       if (!t) continue;
       const hits = words.filter((w) => t.includes(w)).length;
       if (!hits) continue;
       const own = words.filter((w) => d.fileNorm[i]?.includes(w)).length;
-      out[i] += (LEXICAL_WEIGHT * hits + FILE_NAME_WEIGHT * own) / words.length;
+      out[i] = scores[i] + (LEXICAL_WEIGHT * hits + FILE_NAME_WEIGHT * own) / words.length;
     }
     return out;
   }
@@ -731,14 +788,14 @@ export class Index {
   }
 
   /**
-   * Rank files by their best-matching vector among `modalities`.
+   * Rank files by their best-matching vector among `modalities` (a -Infinity score takes no part).
    * percentOf: turns a score into the relevance % shown to the user; results below minPercent are
    * left out.
    */
   rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, excludeFiles = null, percentOf = null, minPercent = 0, withIds = false, after = null, before = null } = {}) {
     if (!d.n) return { results: [], total: 0 };
     const order = [];
-    for (let i = 0; i < d.n; i++) if (modalities.has(d.mod[i])) order.push(i);
+    for (let i = 0; i < d.n; i++) if (modalities.has(d.mod[i]) && scores[i] > -Infinity) order.push(i);
     order.sort((a, b) => scores[b] - scores[a]);
 
     // group by file: the best vector decides the rank; keep top moments for videos
@@ -870,9 +927,24 @@ export class Index {
     return this.db.prepare("SELECT path, kind FROM files WHERE id=?").get(id);
   }
 
+  /**
+   * Take failed files off the "couldn't be processed" list (all of them when ids is null). They aren't
+   * tried again until the file changes; if it then fails again, it is listed again (see _needsWork).
+   */
+  hideErrors(ids = null) {
+    if (!ids) {
+      this.db.exec("UPDATE files SET error_hidden=1 WHERE status='error'");
+      return;
+    }
+    const hide = this.db.prepare("UPDATE files SET error_hidden=1 WHERE id=? AND status='error'");
+    this.db.exec("BEGIN");
+    for (const id of ids) hide.run(id);
+    this.db.exec("COMMIT");
+  }
+
   stats() {
     const c = Object.fromEntries(this.db.prepare("SELECT kind, COUNT(*) AS n FROM files WHERE status='done' GROUP BY kind").all().map((r) => [r.kind, r.n]));
-    const errors = this.db.prepare("SELECT path, error FROM files WHERE status='error' ORDER BY indexed_at DESC LIMIT 20").all();
+    const errors = this.db.prepare("SELECT id, path, error FROM files WHERE status='error' AND error_hidden=0 ORDER BY indexed_at DESC LIMIT 20").all();
     const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM vectors").get();
     return { images: c.image || 0, videos: c.video || 0, vectors: n, errors };
   }
