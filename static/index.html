@@ -48,13 +48,6 @@
   <label class="toggle" data-i18n-title="audio.tip">
     <input type="checkbox" id="useAudio" checked> <span data-i18n="audio.label"></span>
   </label>
-  <label class="select-field hidden" id="viewMode">
-    <span data-i18n="view.label"></span>
-    <select id="viewSelect">
-      <option value="image" data-i18n="view.image"></option>
-      <option value="text" data-i18n="view.text"></option>
-    </select>
-  </label>
   <div class="status" id="status"></div>
   <button class="icon-btn index-toggle hidden" id="indexToggle" type="button">
     <svg class="play" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
@@ -194,7 +187,6 @@
     <h3 id="vName"></h3>
     <p class="muted small path" id="vPath"></p>
     <p class="small" id="vScore"></p>
-    <p class="small muted hidden" id="vOcr" data-i18n="viewer.ocrPending"></p>
     <div id="vText" class="hidden"></div>
     <div id="vMoments"></div>
     <div class="col">

@@ -27,14 +27,6 @@ async function remoteSizes() {
   return sizes;
 }
 
-// PaddleOCR PP-OCRv5: text detector + Korean/Latin recognizer (models/ocr)
-const OCR_DEST = path.join(DEST, "..", "ocr");
-const OCR_FILES = {
-  "det.onnx": "PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/main/inference.onnx",
-  "rec.onnx": "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.onnx",
-  "rec.yml": "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.yml",
-};
-
 async function download(url, out, label) {
   process.stdout.write(`↓ ${label}… `);
   const res = await fetch(url);
@@ -46,11 +38,6 @@ async function download(url, out, label) {
 
 async function main() {
   fs.mkdirSync(path.join(DEST, "onnx"), { recursive: true });
-  fs.mkdirSync(OCR_DEST, { recursive: true });
-  for (const [name, src] of Object.entries(OCR_FILES)) {
-    const out = path.join(OCR_DEST, name);
-    if (!fs.existsSync(out)) await download(`https://huggingface.co/${src}`, out, `ocr/${name}`);
-  }
   let sizes = {};
   try {
     sizes = await remoteSizes();

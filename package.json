@@ -63,10 +63,6 @@
         "to": "models/embeddinggemma-2-ONNX"
       },
       {
-        "from": "models/ocr",
-        "to": "models/ocr"
-      },
-      {
         "from": "LICENSE",
         "to": "LICENSE"
       },

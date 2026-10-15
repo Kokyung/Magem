@@ -9,8 +9,6 @@ with them (in `node_modules/<package>/` and the model folders) and apply to thos
 | Model | Source | License |
 |---|---|---|
 | EmbeddingGemma 2 (ONNX: fp16 text/vision, q8 audio) | [onnx-community/embeddinggemma-2-ONNX](https://huggingface.co/onnx-community/embeddinggemma-2-ONNX), from [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2) | Apache-2.0 |
-| PaddleOCR PP-OCRv5 mobile text detector | [PaddlePaddle/PP-OCRv5_mobile_det_onnx](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx) | Apache-2.0 |
-| PaddleOCR PP-OCRv5 Korean text recognizer | [PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx](https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx) | Apache-2.0 |
 
 ## Main components
 

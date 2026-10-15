@@ -153,7 +153,11 @@ input { font: inherit; color: inherit; }
 .select-all[aria-checked="mixed"] .round-check::after { content: ""; width: 8px; height: 2px; background: #fff; border-radius: 1px; }
 .browser-head .select-all { margin-inline-start: auto; }
 .browser-head .select-all:not(.hidden) + .sort { margin-inline-start: 0; }
-.results-bar { display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; }
+/* stays in view under the header while scrolling through results, so select-all is always at hand */
+.results-bar {
+  position: sticky; top: var(--top-height, 69px); z-index: 5; display: flex; align-items: center; gap: 12px;
+  margin: 0 -24px 12px; padding: 8px 24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px);
+}
 .results-bar .summary { flex: 1; margin: 0; }
 .browser-head .sort .dropdown-btn { font-size: 13px; padding-block: 3px; padding-inline: 10px 28px; }
 /* one button: ▶ starts a run (new and changed files), ⏸ pauses until pressed again */
@@ -300,8 +304,6 @@ main { padding: 8px 24px 60px; }
 .result-section h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
 .result-section h2 .count { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--surface-2); border-radius: 999px; padding: 1px 9px; }
 .result-section header p { margin: 0; }
-.pending-note { margin: -4px 0 12px; padding: 8px 12px; border-radius: 10px; background: var(--surface-2); color: var(--muted); }
-.empty-note { padding: 18px; border: 1px dashed var(--border); border-radius: var(--radius); margin: 0; }
 
 /* recent searches */
 .recent {

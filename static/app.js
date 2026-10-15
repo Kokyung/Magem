@@ -1,10 +1,9 @@
 const $ = (id) => document.getElementById(id);
 document.documentElement.classList.add(`platform-${window.mmf?.platform || "web"}`);
 const PAGE = 60;          // image-relevance list page
-const SECTION_PAGE = 12;  // first page of each text-relevance section (two rows)
-const SECTION_MORE = 24;
-const SECTIONS = ["name", "ocr", "audio"];
-const VIA_KEY = { image: "via.scene", frame: "via.scene", audio: "via.audio", name: "via.name", ocr: "via.ocr" };
+const NAME_PAGE = 12;     // first page of the file & folder names list above the results (two rows)
+const NAME_MORE = 24;
+const VIA_KEY = { image: "via.scene", frame: "via.scene", audio: "via.audio", name: "via.name" };
 
 // ---------- language ----------
 // UI text comes from i18n.js; error messages from the engine and the toasts below stay in English.
@@ -30,8 +29,7 @@ const store = {
 const newList = () => ({ results: [], total: 0, offset: 0 });
 const state = {
   type: "all", audio: true, query: "", imageBlob: null, similarVid: null, similarExclude: null,
-  view: store.get("mmf.view", "image") === "text" ? "text" : "image",
-  lists: {},            // "main" for image relevance; name / ocr / audio for text relevance
+  lists: {},            // "main"; a text search also has "name" (file & folder names, shown above it)
   expanded: false,      // user paged a list: don't auto-refresh under them
   seq: 0, hasIndex: false, progress: null,
   viewer: { list: null, index: -1 },
@@ -112,14 +110,8 @@ async function runSearch(append = null) {
         if (state.similarExclude != null) p.set("exclude", state.similarExclude);
         return api(`/api/similar?${p}`);
       });
-    } else if (state.query && state.view === "image") {
-      await loadMain(seq, append, (p) => {
-        p.set("q", state.query);
-        p.set("view", "image");
-        return api(`/api/search?${p}`);
-      });
     } else if (state.query) {
-      await loadSections(seq, append);
+      await loadText(seq, append);
     } else {
       state.lists = {};
       render();
@@ -151,15 +143,16 @@ async function loadMain(seq, append, fetchPage) {
   render();
 }
 
-async function loadSections(seq, appendKey) {
-  const p = baseParams(appendKey ? SECTION_MORE : SECTION_PAGE, appendKey ? state.lists[appendKey].offset : 0);
+/** A text search: files whose name matches, then everything else (in one request); appendKey pages one of them. */
+async function loadText(seq, appendKey) {
+  const p = baseParams(appendKey === "name" ? NAME_MORE : PAGE, appendKey ? state.lists[appendKey].offset : 0);
   p.set("q", state.query);
-  p.set("view", "text");
   if (appendKey) p.set("section", appendKey);
-  const { sections } = await api(`/api/search?${p}`);
+  else p.set("nameLimit", NAME_PAGE);
+  const lists = await api(`/api/search?${p}`);
   if (seq !== state.seq) return;
   if (!appendKey) state.lists = {};
-  for (const [key, data] of Object.entries(sections)) {
+  for (const [key, data] of Object.entries(lists)) {
     const list = appendKey ? state.lists[key] : newList();
     list.results = list.results.concat(data.results);
     list.total = data.total;
@@ -173,12 +166,11 @@ function render() {
   const active = isActive();
   updateSelectAll();
   updateHome();
-  $("viewMode").classList.toggle("hidden", !isTextQuery());
   const box = $("results");
   box.innerHTML = "";
   if (!active) { $("summary").textContent = ""; return; }
   hideBoot();
-  syncSelection(`results ${inputSeq} ${state.type} ${state.audio} ${state.view}`); // the filters change what is shown
+  syncSelection(`results ${inputSeq} ${state.type} ${state.audio}`); // the filters change what is shown
   keepSelected(Object.values(state.lists).flatMap((l) => l.results));
   if (state.searching === state.seq && !state.lists.main) { // only the latest search: a superseded one doesn't count
     $("summary").innerHTML = `<span class="sk sk-line"></span>`;
@@ -186,56 +178,31 @@ function render() {
     return;
   }
 
-  if (state.lists.main) {
-    const list = state.lists.main;
-    const byImage = state.imageBlob ? t("summary.byImage") : state.similarVid != null ? t("summary.similar") : null;
-    const label = byImage ? (state.query ? t("summary.imagePlus", { q: state.query }) : byImage) : t("summary.byImageView", { q: state.query });
-    $("summary").textContent = list.total ? t("summary.count", { label, n: num(list.total) }) : t("summary.none", { label });
-    box.appendChild(listBlock("main", list));
+  const { name, main } = state.lists;
+  if (isTextQuery()) {
+    // files whose name or folder matches first, then everything else, each under its heading
+    const label = t("summary.query", { q: state.query });
+    const total = (name?.total || 0) + (main?.total || 0);
+    $("summary").textContent = total ? t("summary.count", { label, n: num(total) }) : t("summary.none", { label });
+    if (name?.total) box.appendChild(resultSection("name", name, "name"));
+    if (main?.total) box.appendChild(resultSection("main", main, "scene"));
     return;
   }
-  const keys = SECTIONS.filter((k) => state.lists[k]);
-  const total = keys.reduce((n, k) => n + state.lists[k].total, 0);
-  $("summary").textContent = t("summary.count", { label: t("summary.byTextView", { q: state.query }), n: num(total) });
-  for (const key of keys) {
-    const list = state.lists[key];
-    const sec = document.createElement("section");
-    sec.className = "result-section";
-    sec.innerHTML = `<header><h2>${esc(t(`sec.${key}.title`))}<span class="count">${num(list.total)}</span></h2>
-      <p class="muted small">${esc(t(`sec.${key}.desc`))}</p></header>`;
-    if (key === "ocr") {
-      const note = document.createElement("p");
-      note.id = "ocrPendingNote";
-      note.className = "pending-note small hidden";
-      sec.appendChild(note);
-      updateOcrPendingNote(note);
-    }
-    if (list.total) {
-      sec.appendChild(listBlock(key, list));
-    } else {
-      const note = document.createElement("p");
-      note.className = "muted small empty-note";
-      const p = state.progress;
-      note.textContent = key === "name" && p?.running && p.phase === "names"
-          ? t("sec.analyzingNames")
-          : t("sec.empty");
-      sec.appendChild(note);
-    }
-    box.appendChild(sec);
+  if (main) {
+    const label = state.imageBlob ? t("summary.byImage") : t("summary.similar");
+    const shown = state.query ? t("summary.imagePlus", { q: state.query }) : label;
+    $("summary").textContent = main.total ? t("summary.count", { label: shown, n: num(main.total) }) : t("summary.none", { label: shown });
+    box.appendChild(listBlock("main", main));
   }
 }
 
-/** "Text in photos" can grow while text recognition is still working through files. */
-function updateOcrPendingNote(note = $("ocrPendingNote")) {
-  if (!note) return;
-  const o = state.ocr;
-  const left = o && o.available ? o.pendingImages + o.pendingVideos : 0;
-  note.classList.toggle("hidden", !left);
-  if (!left) return;
-  const parts = [o.pendingImages && t("count.photos", { n: num(o.pendingImages) }), o.pendingVideos && t("count.videos", { n: num(o.pendingVideos) })].filter(Boolean);
-  const p = state.progress;
-  note.textContent = `${t("ocr.pending", { parts: parts.join(" · ") })} `
-    + t(!p?.running ? "ocr.stopped" : p.ocr?.running ? "ocr.running" : "ocr.afterIndex");
+/** A headed block of results (heading key: sec.<name>.title). */
+function resultSection(key, list, heading) {
+  const sec = document.createElement("section");
+  sec.className = "result-section";
+  sec.innerHTML = `<header><h2>${esc(t(`sec.${heading}.title`))}<span class="count">${num(list.total)}</span></h2></header>`;
+  sec.appendChild(listBlock(key, list));
+  return sec;
 }
 
 /** Grid of tiles plus its "show more" button. */
@@ -264,11 +231,11 @@ function tile(r, list, i) {
   b.title = r.path;
   let badges = "";
   if (r.kind === "video") {
-    const icon = r.via === "audio" ? "🔊" : r.via === "ocr" ? "T" : "▶";
+    const icon = r.via === "audio" ? "🔊" : "▶";
     if (r.t != null) badges += `<span class="badge tl">${icon} ${fmtTime(r.t)}</span>`;
     if (r.duration) badges += `<span class="badge tr">${fmtTime(r.duration)}</span>`;
   }
-  // name/OCR hits show the matched text on the tile; others show the file name on hover
+  // name hits show the matched text on the tile; others show the file name on hover
   const caption = r.text
     ? `<span class="caption"><span>${highlight(r.text.replace(/\s*\n\s*/g, " · "), state.query)}</span></span>`
     : `<span class="name">${esc(r.name)}</span>`;
@@ -311,6 +278,11 @@ function skeletonGrid(n) {
   }
   return grid;
 }
+
+// the results bar (count, select-all) sticks under the header, whose height changes when it wraps
+new ResizeObserver(([entry]) => {
+  document.documentElement.style.setProperty("--top-height", `${entry.target.offsetHeight}px`);
+}).observe(document.querySelector(".top"));
 
 // the start screen's placeholders, until the first status and folder listing arrive
 $("bootGrid").appendChild(skeletonGrid(14));
@@ -515,11 +487,9 @@ function openViewer(list, i) {
   $("vPath").textContent = r.path;
   $("vScore").innerHTML = r.percent == null ? ""
     : `<span class="muted">${esc(t("viewer.relevance"))}</span> ${r.percent}% · <span class="muted">${esc(t("viewer.foundBy", { via: t(VIA_KEY[r.via] || "via.scene") }))}</span>`;
-  $("vOcr").classList.toggle("hidden", r.ocrDone || !state.ocr?.available);
-  if (!r.ocrDone) refreshViewerOcr();
   $("vSimilar").disabled = r.vid == null;
   $("vText").classList.toggle("hidden", !r.text);
-  $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t(r.via === "ocr" ? "viewer.ocrText" : "viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
+  $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t("viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
 
   const media = $("viewerMedia");
   media.innerHTML = "";
@@ -548,7 +518,7 @@ function openViewer(list, i) {
     r.moments.forEach((m) => {
       const btn = document.createElement("button");
       btn.className = "moment" + (m.t === r.t ? " on" : "");
-      const icon = m.modality === "audio" ? "🔊 " : m.modality === "ocr" ? "T " : "";
+      const icon = m.modality === "audio" ? "🔊 " : "";
       btn.innerHTML = `<img src="/thumb/${esc(m.thumb)}" alt=""><span>${icon}${fmtTime(m.t)}</span>`;
       if (m.text) btn.title = m.text;
       btn.onclick = () => {
@@ -560,18 +530,6 @@ function openViewer(list, i) {
     });
     mom.appendChild(g);
   }
-}
-
-/** The viewer's "waiting to be recognized" line follows the file's current OCR state, not the search snapshot. */
-async function refreshViewerOcr() {
-  const r = viewerResult();
-  if (!r || r.ocrDone) return;
-  try {
-    if ((await post("/api/file", { id: r.id })).ocr_done) r.ocrDone = true;
-  } catch {
-    return;
-  }
-  if (viewerResult() === r) $("vOcr").classList.toggle("hidden", r.ocrDone || !state.ocr?.available);
 }
 
 function closeViewer() {
@@ -1071,7 +1029,6 @@ function segment(id, attr, onPick) {
   };
 }
 segment("typeFilter", "type", (v) => { state.type = v; runSearch(); });
-$("viewSelect").onchange = (e) => { state.view = e.target.value; store.set("mmf.view", state.view); runSearch(); };
 $("useAudio").onchange = (e) => { state.audio = e.target.checked; runSearch(); };
 
 function renderExamples() {
@@ -1389,9 +1346,6 @@ async function refreshStatus() {
   const { progress: p, folders, stats } = s;
   lastStatus = s;
   state.progress = p;
-  state.ocr = stats.ocr;
-  updateOcrPendingNote();
-  if (p.ocr?.running) refreshViewerOcr();
   state.hasIndex = stats.images + stats.videos > 0;
   if (!state.hasIndex) hideBoot(); // otherwise the folder listing replaces the placeholders
   $("welcome").classList.toggle("hidden", folders.length > 0);
@@ -1399,8 +1353,7 @@ async function refreshStatus() {
   renderStatus(s);
 
   // refresh visible results as new files land in the index (not while the user is paging or viewing)
-  // both counters: text recognition runs alongside indexing and adds matches of its own
-  const done = p.done + (p.ocr?.done || 0);
+  const done = p.done;
   if ((p.running && Math.floor(done / 10) !== Math.floor(lastDone / 10)) || (wasRunning && !p.running)) {
     if (isActive() && !state.viewer.list && !state.expanded) runSearch();
     else if (!isActive() && !state.viewer.list) loadBrowse(); // new thumbnails / counts
@@ -1427,24 +1380,20 @@ function renderStatus(s) {
   if (p.running) {
     const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
     const cur = p.current ? p.current.split(/[\\/]/).pop() : "";
-    // text recognition can run alongside indexing, so it has its own counter
-    const o = p.ocr || {};
-    const ocrPart = o.running ? t("phase.ocr", { done: num(o.done), total: num(o.total) }) : "";
     const main = p.phase === "scanning" ? t("phase.scanning")
       : p.phase === "loading-model" ? t("phase.loadingModel")
-      : p.phase === "ocr" ? (ocrPart ? "" : t("phase.ocrPreparing"))
       : `${t(p.phase === "names" ? "phase.names" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
-    // the time left for the whole run (indexing, file names and text recognition together, estimated by the
-    // engine), in bold right after what is being worked on
+    // the time left for the whole run (file names and indexing together, estimated by the engine), in bold
+    // right after what is being worked on
     const eta = s.eta != null ? t("eta", { time: fmtTime(s.eta) }) : "";
-    const parts = [main, ocrPart, counts].filter(Boolean);
-    if (eta) parts.splice(main ? 1 : ocrPart ? 1 : 0, 0, { bold: eta });
+    const parts = [main, counts];
+    if (eta) parts.splice(1, 0, { bold: eta });
     $("status").replaceChildren(...parts.flatMap((part, i) => {
       const node = typeof part === "string" ? part : Object.assign(document.createElement("b"), { textContent: part.bold });
       return i ? [" · ", node] : [node];
     }));
     $("progress").classList.remove("hidden");
-    $("progressBar").style.width = `${p.phase === "ocr" && o.total ? Math.round((o.done / o.total) * 100) : pct}%`;
+    $("progressBar").style.width = `${pct}%`;
   } else {
     const done = s.paused ? t("status.paused") : s.lastRun ? t("status.indexedAt", { time: fmtWhen(s.lastRun.finishedAt) }) : "";
     $("status").textContent = [counts, done, engLabel].filter(Boolean).join(" · ");
@@ -1489,7 +1438,7 @@ function renderStatus(s) {
     li.appendChild(rm);
     ex.appendChild(li);
   });
-  $("statsLine").textContent = t("stats.line", { vectors: num(stats.vectors), text: num(stats.withText), engine: engLabel });
+  $("statsLine").textContent = t("stats.line", { vectors: num(stats.vectors), engine: engLabel });
   $("errorsBox").classList.toggle("hidden", !stats.errors.length);
   $("errors").innerHTML = stats.errors.map((e) => `<li><b>${esc(e.path.split(/[\\/]/).pop())}</b><br>${esc(e.error || "")}</li>`).join("");
 }
@@ -1501,8 +1450,6 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   prefsLoaded = true;
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
-  state.view = store.get("mmf.view", "image") === "text" ? "text" : "image";
-  $("viewSelect").value = state.view;
   readBrowseSort();
   syncDropdowns();
   browse.path = store.get("mmf.browse", null);

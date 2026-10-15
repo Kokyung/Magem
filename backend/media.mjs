@@ -87,16 +87,6 @@ export function prepareImage(input, thumbPath) {
   return withFallback(input, (src) => decodeAndResize(src, thumbPath));
 }
 
-/** Upright RGB pixels no larger than maxSide (for OCR). */
-export function loadRaw(input, maxSide) {
-  return withFallback(input, async (src) => {
-    const { data, info } = await sharp(src, { failOn: "none", animated: false }).rotate()
-      .resize(maxSide, maxSide, { fit: "inside", withoutEnlargement: true })
-      .removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
-    return { data, width: info.width, height: info.height };
-  });
-}
-
 /** The whole picture, upright and with its transparency, as a PNG for the clipboard (long edge capped). */
 export function clipboardPng(input, maxSide = 8192) {
   return withFallback(input, (src) => sharp(src, { failOn: "none", animated: false }).rotate()

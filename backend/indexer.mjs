@@ -8,7 +8,6 @@ import { DatabaseSync } from "node:sqlite";
 import * as embedder from "./embedder.mjs";
 import { badRequest } from "./errors.mjs";
 import * as media from "./media.mjs";
-import * as ocr from "./ocr.mjs";
 
 const FRAME_MIN_INTERVAL = 2.0;
 const FRAME_MAX_INTERVAL = 30.0;
@@ -20,13 +19,10 @@ const AUDIO_MIN_DBFS = -45.0; // quieter chunks are skipped (silence matches eve
 const EMBED_BATCH = 4;
 const WORKERS = 3;
 const NAME_BATCH = 32;
-const OCR_WORKERS = 2;
 // Seconds of work per file (one worker), used for the time-left estimate before a run has measured its own.
 // Videos take far longer than photos, which is why they are counted apart. Replaced by real measurements,
 // which are kept across runs.
-const PACE_GUESS = { image: 1.5, video: 20, ocrImage: 0.6, ocrVideo: 6, name: 0.01 };
-const OCR_MAX_FRAMES = 40; // per video
-const OCR_MAX_CHARS = 1000;
+const PACE_GUESS = { image: 1.5, video: 20, name: 0.01 };
 
 // Generic queries used to estimate how much each vector matches "anything". Because the mean of dot
 // products equals the dot product with the mean, one averaged anchor vector is enough.
@@ -80,6 +76,9 @@ function nameDoc(file, folder) {
 /** Lowercase, drop whitespace and punctuation: "출입 금지!" and "출입금지" compare equal. */
 const normText = (t) => (t || "").normalize("NFC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 const LEXICAL_WEIGHT = 0.2;
+// a word found in the file's own name (not just a folder above it) counts this much more, so "2025" puts
+// DJI_20251024….MP4 ahead of the thousands of files that are only inside a "20251025 …" folder
+const FILE_NAME_WEIGHT = 0.15;
 
 /** Is `file` inside directory `dir` (which may be a drive root)? Compared in NFC: macOS may hand out
  *  either Unicode form. */
@@ -132,8 +131,10 @@ export class Index {
     if (!cols("files").includes("name_done")) this.db.exec("ALTER TABLE files ADD COLUMN name_done INTEGER DEFAULT 0");
     if (!cols("files").includes("ocr_done")) this.db.exec("ALTER TABLE files ADD COLUMN ocr_done INTEGER DEFAULT 0");
     if (!cols("vectors").includes("text")) this.db.exec("ALTER TABLE vectors ADD COLUMN text TEXT");
-    this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle", ocr: { running: false, total: 0, done: 0 } };
-    const measured = this.pref("index.pace") || {};
+    this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle" };
+    // text recognition (PaddleOCR) was removed: its entries no longer have anything to answer
+    this.db.exec("DELETE FROM vectors WHERE modality='ocr'");
+    const measured = Object.fromEntries(Object.entries(this.pref("index.pace") || {}).filter(([k]) => k in PACE_GUESS));
     this._pace = { ...PACE_GUESS, ...measured };
     this._paceMeasured = new Set(Object.keys(measured)); // the rest are still guesses
     this._left = { image: 0, video: 0 }; // files of this run still to index
@@ -393,10 +394,6 @@ export class Index {
         await embedder.load();
         pr.phase = "indexing";
       }
-      // text recognition for already-indexed files runs alongside, so a long media pass (e.g. hours of
-      // 4K video) can't hold it back indefinitely
-      // (files about to be re-indexed are left to the pass after it, so the two never work on one file)
-      const ocrBacklog = this._stop ? null : this._enrichOcr(new Set(todo.map((it) => it.path)));
       let next = 0;
       const worker = async () => {
         while (!this._stop && next < todo.length) {
@@ -410,9 +407,6 @@ export class Index {
       };
       await Promise.all(Array.from({ length: WORKERS }, worker));
       if (!this._stop) await this._enrichNames();
-      await ocrBacklog;
-      pr.phase = "ocr";
-      if (!this._stop) await this._enrichOcr(); // files indexed in this run
       // a run that got to the end (not stopped): when the index was last complete, shown in the status line
       if (!this._stop) this.setPref("index.lastRun", { finishedAt: Date.now() });
     } catch (e) {
@@ -434,10 +428,7 @@ export class Index {
     this._paceMeasured.add(kind);
   }
 
-  /**
-   * Seconds until the whole run is done: file names, photos and videos, and text recognition, which runs on
-   * already-indexed files alongside the indexing and on this run's new files after it. null when unknown.
-   */
+  /** Seconds until the whole run is done (file names, then photos and videos); null when unknown. */
   eta() {
     const pr = this.progress;
     if (!pr.running || pr.phase === "scanning") return null;
@@ -447,15 +438,7 @@ export class Index {
     const indexing = (left.image * p.image) / WORKERS + (left.video ? (left.video * p.video) / Math.min(WORKERS, left.video) : 0);
     const newFiles = left.image + left.video;
     const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name;
-    let ocrBacklog = 0, ocrNew = 0;
-    if (ocr.ready()) {
-      const pending = Object.fromEntries(this.db.prepare(
-        "SELECT kind, COUNT(*) AS n FROM files WHERE status='done' AND ocr_done=0 GROUP BY kind").all().map((r) => [r.kind, r.n]));
-      ocrBacklog = ((pending.image || 0) * p.ocrImage + (pending.video || 0) * p.ocrVideo) / OCR_WORKERS;
-      ocrNew = (left.image * p.ocrImage + left.video * p.ocrVideo) / OCR_WORKERS;
-    }
-    // the backlog's text recognition overlaps the indexing; the new files' comes after it
-    return Math.round(names + Math.max(indexing, ocrBacklog) + ocrNew);
+    return Math.round(names + indexing);
   }
 
   async _indexOne(it) {
@@ -581,72 +564,6 @@ export class Index {
     }
   }
 
-  async _enrichOcr(skipPaths = new Set()) {
-    if (!ocr.ready()) return;
-    // images first; videos need frames re-extracted, so they come last
-    const todo = this.db.prepare(
-      "SELECT id, path, kind FROM files WHERE status='done' AND ocr_done=0 ORDER BY kind='video', path",
-    ).all().filter((f) => !skipPaths.has(f.path));
-    if (!todo.length) return;
-    const pr = this.progress.ocr;
-    Object.assign(pr, { running: true, total: todo.length, done: 0 });
-    let next = 0;
-    const worker = async () => {
-      while (!this._stop && next < todo.length) {
-        const f = todo[next++];
-        const t0 = Date.now();
-        try {
-          if (!(await this._ocrFile(f))) continue; // stopped midway: retry on the next run
-          this._measure(f.kind === "video" ? "ocrVideo" : "ocrImage", Date.now() - t0);
-        } catch {
-          this.progress.errors++; // unreadable now; don't retry on every launch
-        }
-        this.db.prepare("UPDATE files SET ocr_done=1 WHERE id=? AND path=?").run(f.id, f.path);
-        pr.done++;
-      }
-    };
-    try {
-      await Promise.all(Array.from({ length: OCR_WORKERS }, worker));
-    } finally {
-      pr.running = false;
-    }
-  }
-
-  /** Returns false if stopped before finishing. */
-  async _ocrFile(f) {
-    const found = []; // {t, thumb, text}
-    if (f.kind === "image") {
-      const text = await ocr.recognize(await media.loadRaw(f.path, ocr.INPUT_SIZE));
-      const { thumb } = this.db.prepare("SELECT thumb FROM files WHERE id=?").get(f.id) || {};
-      if (meaningful(text)) found.push({ t: null, thumb, text });
-    } else {
-      let frames = this.db.prepare("SELECT t, thumb FROM vectors WHERE file_id=? AND modality='frame' ORDER BY t").all(f.id);
-      if (frames.length > OCR_MAX_FRAMES) {
-        const step = frames.length / OCR_MAX_FRAMES;
-        frames = Array.from({ length: OCR_MAX_FRAMES }, (_, i) => frames[Math.floor(i * step)]);
-      }
-      let prev = "";
-      for (const fr of frames) {
-        if (this._stop) return false;
-        const jpg = await media.videoFrame(f.path, fr.t, ocr.INPUT_SIZE).catch(() => null);
-        if (!jpg?.length) continue;
-        const text = await ocr.recognize(await media.loadRaw(jpg, ocr.INPUT_SIZE));
-        // captions and signs stay on screen across frames: keep only changes
-        if (meaningful(text) && text !== prev) found.push({ t: fr.t, thumb: fr.thumb, text });
-        prev = text;
-      }
-    }
-    if (!found.length) return true;
-    const vecs = await embedder.embedDocs(found.map((x) => `title: none | text: ${x.text.slice(0, OCR_MAX_CHARS)}`));
-    // the row must still be this file: ids can be reused once a file is removed from the index
-    const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec, text) SELECT ?, 'ocr', ?, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM files WHERE id=? AND path=?)");
-    this.db.exec("BEGIN");
-    found.forEach((x, k) => ins.run(f.id, x.t, x.thumb, vecBlob(vecs[k]), x.text, f.id, f.path));
-    this.db.exec("COMMIT");
-    this._dirty = true;
-    return true;
-  }
-
   // ---------- search ----------
   async _load() {
     if (this._matrix && (!this._dirty || (this.progress.running && Date.now() - this._matrix.builtAt < 10000))) {
@@ -672,7 +589,8 @@ export class Index {
       M, base, dim, n: rows.length, builtAt: Date.now(),
       vid: rows.map((r) => r.id), fid: rows.map((r) => r.file_id),
       mod: rows.map((r) => r.modality), t: rows.map((r) => r.t), thumb: rows.map((r) => r.thumb),
-      norm: rows.map((r) => (r.text ? normText(r.text) : null)), // for keyword matching on names / OCR text
+      norm: rows.map((r) => (r.text ? normText(r.text) : null)), // for keyword matching on file and folder names
+      fileNorm: rows.map((r) => (r.text ? normText(r.text.split(" / ").pop()) : null)), // the file's own name
     };
     return this._matrix;
   }
@@ -695,7 +613,7 @@ export class Index {
   }
 
   /**
-   * Add a keyword component to name/OCR scores: the share of query words (2+ characters) found in the
+   * Add a keyword component to name scores: the share of query words (2+ characters) found in the
    * text. Semantic similarity alone under-rates exact words buried in long recognized text.
    */
   withKeywords(d, scores, query) {
@@ -706,7 +624,9 @@ export class Index {
       const t = d.norm[i];
       if (!t) continue;
       const hits = words.filter((w) => t.includes(w)).length;
-      if (hits) out[i] += (LEXICAL_WEIGHT * hits) / words.length;
+      if (!hits) continue;
+      const own = words.filter((w) => d.fileNorm[i]?.includes(w)).length;
+      out[i] += (LEXICAL_WEIGHT * hits + FILE_NAME_WEIGHT * own) / words.length;
     }
     return out;
   }
@@ -731,7 +651,7 @@ export class Index {
    * percentOf: turns a score into the relevance % shown to the user; results below minPercent are
    * left out.
    */
-  rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, percentOf = null, minPercent = 0 } = {}) {
+  rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, excludeFiles = null, percentOf = null, minPercent = 0, withIds = false } = {}) {
     if (!d.n) return { results: [], total: 0 };
     const order = [];
     for (let i = 0; i < d.n; i++) if (modalities.has(d.mod[i])) order.push(i);
@@ -741,13 +661,13 @@ export class Index {
     const best = new Map();
     for (const i of order) {
       const fid = d.fid[i];
-      if (fid === excludeFile) continue;
+      if (fid === excludeFile || excludeFiles?.has(fid)) continue;
       let m = best.get(fid);
       if (!m) best.set(fid, (m = { score: scores[i], moments: [] }));
       if (m.moments.length < 6) m.moments.push({ vid: d.vid[i], t: d.t[i], modality: d.mod[i], thumb: d.thumb[i], score: scores[i] });
     }
 
-    const meta = new Map(this.db.prepare("SELECT id, path, kind, duration, thumb, folder, ocr_done FROM files").all().map((r) => [r.id, r]));
+    const meta = new Map(this.db.prepare("SELECT id, path, kind, duration, thumb, folder FROM files").all().map((r) => [r.id, r]));
     // an indexed folder that is missing entirely (e.g. an unplugged drive): hide its files, keep them indexed
     const offline = new Set(this.db.prepare("SELECT path FROM folders").all().map((r) => r.path).filter((p) => !fs.existsSync(p)));
     let results = [];
@@ -757,7 +677,7 @@ export class Index {
       if (offline.has(f.folder)) continue;
       const top = m.moments[0];
       results.push({
-        id: fid, path: f.path, name: path.basename(f.path), kind: f.kind, duration: f.duration, ocrDone: !!f.ocr_done,
+        id: fid, path: f.path, name: path.basename(f.path), kind: f.kind, duration: f.duration,
         thumb: (f.kind === "video" && top.thumb) || f.thumb, score: Math.round(m.score * 1e4) / 1e4,
         t: top.t, via: top.modality, vid: top.vid,
         moments: f.kind === "video" ? dedupeMoments(m.moments.filter((x) => x.t != null)).sort((a, b) => a.t - b.t) : [],
@@ -781,13 +701,11 @@ export class Index {
       this._deleteFiles(deleted);
       this._dirty = true;
     }
-    // name/OCR hits carry the matched text so the UI can show why they matched
+    // name hits carry the matched text so the UI can show why they matched
     const textOf = this.db.prepare("SELECT text FROM vectors WHERE id=?");
-    for (const r of page) {
-      if (r.via === "name" || r.via === "ocr") r.text = textOf.get(r.vid)?.text || "";
-      for (const m of r.moments) if (m.modality === "ocr") m.text = textOf.get(m.vid)?.text || "";
-    }
-    return { results: page, total: results.length };
+    for (const r of page) if (r.via === "name") r.text = textOf.get(r.vid)?.text || "";
+    // withIds: every matching file, not just this page (the names list's are left out of the list below it)
+    return { results: page, total: results.length, ...(withIds && { ids: results.map((r) => r.id) }) };
   }
 
   /**
@@ -833,7 +751,7 @@ export class Index {
       const i = f.indexOf(path.sep, pre.length);
       if (i > pre.length) { const child = f.slice(pre.length, i); childCounts.set(child, (childCounts.get(child) || 0) + 1); }
     }
-    const fileRow = this.db.prepare("SELECT id, path, kind, duration, thumb, ocr_done, status FROM files WHERE path=?");
+    const fileRow = this.db.prepare("SELECT id, path, kind, duration, thumb, status FROM files WHERE path=?");
     const firstVisual = this.db.prepare("SELECT id FROM vectors WHERE file_id=? AND modality IN ('image','frame') ORDER BY t LIMIT 1");
     const dirs = [];
     const files = [];
@@ -854,27 +772,21 @@ export class Index {
       if (!e.isFile() || e.name.startsWith(".") || !kind) continue;
       const f = fileRow.get(full);
       files.push(f && f.status === "done"
-        ? { id: f.id, path: f.path, name, mtime, kind: f.kind, duration: f.duration, thumb: f.thumb, ocrDone: !!f.ocr_done, vid: firstVisual.get(f.id)?.id ?? null, indexed: true }
+        ? { id: f.id, path: f.path, name, mtime, kind: f.kind, duration: f.duration, thumb: f.thumb, vid: firstVisual.get(f.id)?.id ?? null, indexed: true }
         : { path: full, name, mtime, kind, indexed: false, failed: f?.status === "error" });
     }
     return { path: dir, root, dirs, files };
   }
 
   file(id) {
-    return this.db.prepare("SELECT path, kind, ocr_done FROM files WHERE id=?").get(id);
+    return this.db.prepare("SELECT path, kind FROM files WHERE id=?").get(id);
   }
 
   stats() {
     const c = Object.fromEntries(this.db.prepare("SELECT kind, COUNT(*) AS n FROM files WHERE status='done' GROUP BY kind").all().map((r) => [r.kind, r.n]));
     const errors = this.db.prepare("SELECT path, error FROM files WHERE status='error' ORDER BY indexed_at DESC LIMIT 20").all();
     const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM vectors").get();
-    const { texts } = this.db.prepare("SELECT COUNT(DISTINCT file_id) AS texts FROM vectors WHERE modality='ocr'").get();
-    const pending = Object.fromEntries(this.db.prepare("SELECT kind, COUNT(*) AS n FROM files WHERE status='done' AND ocr_done=0 GROUP BY kind").all().map((r) => [r.kind, r.n]));
-    return {
-      images: c.image || 0, videos: c.video || 0, vectors: n, withText: texts, errors,
-      // text recognition still to do (it runs last, while the app is open)
-      ocr: { available: ocr.ready(), pendingImages: pending.image || 0, pendingVideos: pending.video || 0 },
-    };
+    return { images: c.image || 0, videos: c.video || 0, vectors: n, errors };
   }
 }
 
