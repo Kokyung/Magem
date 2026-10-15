@@ -1445,7 +1445,7 @@ function renderStatus(s) {
     const cur = p.current ? p.current.split(/[\\/]/).pop() : "";
     const main = p.phase === "scanning" ? t("phase.scanning")
       : p.phase === "loading-model" ? t("phase.loadingModel")
-      : `${t(p.phase === "names" ? "phase.names" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
+      : `${t(p.phase === "names" ? "phase.names" : p.phase === "dates" ? "phase.updating" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
     // the time left for the whole run (file names and indexing together, estimated by the engine), in bold
     // right after what is being worked on
     const eta = s.eta != null ? t("eta", { time: fmtTime(s.eta) }) : "";

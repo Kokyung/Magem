@@ -141,6 +141,8 @@ export class Index {
     this._pace = { ...PACE_GUESS, ...measured };
     this._paceMeasured = new Set(Object.keys(measured)); // the rest are still guesses
     this._left = { image: 0, video: 0 }; // files of this run still to index
+    this._run = {}; // this run's measurements per kind of work: { prior, weight, seconds, count }
+    this._eta = null; // the estimate last shown, and when: { at, value }
     this._stop = false;
     this._running = null;
     this._matrix = null;
@@ -385,6 +387,8 @@ export class Index {
     Object.assign(pr, { running: true, phase: "scanning", total: 0, done: 0, errors: 0, current: "" });
     try {
       const todo = (await this._scan()).filter((it) => this._needsWork(it));
+      // counted now so the estimate covers the indexing still to come during the passes below
+      this._left = { image: todo.filter((it) => it.kind === "image").length, video: todo.filter((it) => it.kind === "video").length };
       if (!this._stop) await this._repairThumbs(new Set(todo.map((it) => it.path)));
       if (!this._stop) await this._fillDates(); // files indexed before capture dates were kept
       // file names are quick to embed: cover the already-indexed files before the long media pass
@@ -393,7 +397,6 @@ export class Index {
       // images first: quick results, then the slower videos
       todo.sort((a, b) => (a.kind === b.kind ? a.path.localeCompare(b.path) : a.kind === "image" ? -1 : 1));
       Object.assign(pr, { phase: todo.length ? "loading-model" : "indexing", total: todo.length });
-      this._left = { image: todo.filter((it) => it.kind === "image").length, video: todo.filter((it) => it.kind === "video").length };
       if (todo.length) {
         await embedder.load();
         pr.phase = "indexing";
@@ -419,16 +422,24 @@ export class Index {
     } finally {
       Object.assign(pr, { running: false, phase: "idle", current: "" });
       this._left = { image: 0, video: 0 };
+      this._run = {};
+      this._eta = null;
       this._dirty = true;
       // the next run's estimate starts from these (only kinds actually measured)
       this.setPref("index.pace", Object.fromEntries([...this._paceMeasured].map((k) => [k, this._pace[k]])));
     }
   }
 
-  /** Running average of seconds per file (per worker) for one kind of work; the first measurement replaces the guess. */
+  /**
+   * Seconds per file (per worker) for one kind of work: the average over this whole run, so one unusually
+   * long or short file barely moves it. A pace measured on an earlier run counts as a few files to start
+   * with; a mere guess is dropped at the first measurement.
+   */
   _measure(kind, ms) {
-    const s = ms / 1000;
-    this._pace[kind] = this._paceMeasured.has(kind) ? this._pace[kind] * 0.8 + s * 0.2 : s;
+    const r = (this._run[kind] ??= { prior: this._pace[kind], weight: this._paceMeasured.has(kind) ? 3 : 0, seconds: 0, count: 0 });
+    r.seconds += ms / 1000;
+    r.count++;
+    this._pace[kind] = (r.prior * r.weight + r.seconds) / (r.weight + r.count);
     this._paceMeasured.add(kind);
   }
 
@@ -443,7 +454,18 @@ export class Index {
     const newFiles = left.image + left.video;
     const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name;
     const dates = pr.phase === "dates" ? ((pr.total - pr.done) * p.date) / DATE_WORKERS : 0;
-    return Math.round(dates + names + indexing);
+    const raw = dates + names + indexing;
+    // shown: counts down with the clock and eases toward each new estimate (over ~15 s), so it doesn't jump
+    // back and forth as files of different lengths finish
+    const now = Date.now();
+    if (this._eta) {
+      const dt = (now - this._eta.at) / 1000;
+      const ticking = Math.max(this._eta.value - dt, 0);
+      this._eta = { at: now, value: ticking + (raw - ticking) * (1 - Math.exp(-dt / 15)) };
+    } else {
+      this._eta = { at: now, value: raw };
+    }
+    return Math.round(this._eta.value);
   }
 
   async _indexOne(it) {
