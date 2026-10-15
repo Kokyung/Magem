@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { applyStagedRestore, BACKUP_EXT, cleanupLeftovers, confirmRestore, createBackup, rollbackRestore, stageRestore } from "./index-backup.mjs";
 
 const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, "models") : path.join(APP_ROOT, "models");
@@ -31,6 +32,8 @@ let trayNoticeShown = false; // the one-time "still running in the tray" notice,
 let trayLabels = { // replaced by the page's language
   open: "Open Magem", settings: "Settings", quit: "Quit",
   notice: "Magem is still running in the system tray and keeps indexing. To quit, use the tray icon’s menu.",
+  // the quit confirmation while a backup / restore runs
+  jobQuitBackup: "Backing up the index. Quit anyway?", jobQuitRestore: "Restoring the index. Quit anyway?", keepRunning: "Cancel",
 };
 // login items only make sense for the installed app: in development they would register the bare Electron binary
 const LOGIN_ITEM_PLATFORM = process.platform === "darwin" || IS_WIN;
@@ -85,6 +88,19 @@ function migrateDataDir() {
 }
 app.on("second-instance", () => { showWindow(); });
 
+let backendExited = false;
+let checkingRestore = false; // the engine is opening a just-restored index for the first time
+
+/** Stop the engine and wait until it has let go of its files (or give up after 5 s). */
+function stopBackend() {
+  if (!backend || backendExited) return Promise.resolve();
+  return new Promise((resolve) => {
+    backend.once("exit", resolve);
+    backend.kill();
+    setTimeout(resolve, 5000);
+  });
+}
+
 function startBackend() {
   const dataDir = app.getPath("userData");
   const logDir = path.join(dataDir, "logs");
@@ -117,8 +133,10 @@ function startBackend() {
     });
     backend.on("exit", (code) => {
       clearTimeout(timer);
+      backendExited = true;
       if (quitting) return;
       reject(new Error(`The search engine stopped (code ${code})`));
+      if (checkingRestore) return; // startup puts the previous index back and reports it
       dialog.showErrorBox("Magem", `The search engine stopped unexpectedly (code ${code}).\nLog: ${path.join(logDir, "engine.log")}`);
       app.quit();
     });
@@ -378,6 +396,133 @@ ipcMain.handle("copy-image", async (_e, id) => {
 });
 ipcMain.handle("copy-paths", async (_e, ids) => { await clipboard.writeText((await indexedPaths(ids)).join(os.EOL)); });
 ipcMain.handle("copy-files", async (_e, ids) => { await copyFilesToClipboard(await indexedPaths(ids)); });
+
+// ---------- dragging tiles out of the window ----------
+/** The tile's thumbnail, cropped square, as the picture under the pointer while dragging. */
+function dragIcon(thumb) {
+  let image = nativeImage.createFromPath(path.join(app.getPath("userData"), "thumbs", path.basename(String(thumb))));
+  if (image.isEmpty()) image = nativeImage.createFromPath(path.join(APP_ROOT, "static", "logo.png"));
+  const { width, height } = image.getSize();
+  const side = Math.min(width, height);
+  return image.crop({ x: Math.floor((width - side) / 2), y: Math.floor((height - side) / 2), width: side, height: side })
+    .resize({ width: 96, height: 96, quality: "best" });
+}
+// a native drag carries the real files, so Finder, File Explorer, mail and web pages receive them
+ipcMain.on("start-file-drag", async (e, ids, thumb) => {
+  try {
+    const files = await indexedPaths(ids);
+    e.sender.startDrag({ file: files[0], files, icon: dragIcon(thumb) });
+  } catch (err) {
+    logMain(`file drag failed: ${err.message}`);
+  }
+});
+
+// ---------- index backup / restore ----------
+// One job at a time. The page shows it in a modal and asks for its state; quitting while it runs asks first.
+let indexJob = null;
+let choosingJob = false; // a backup/restore file chooser is open: the slot is taken
+let quitConfirmed = false;
+let confirmingQuit = false;
+const jobView = () => indexJob && {
+  kind: indexJob.kind, state: indexJob.state, startedAt: indexJob.startedAt, finishedAt: indexJob.finishedAt,
+  file: indexJob.file ? path.basename(indexJob.file) : null, error: indexJob.error, progress: jobProgress(indexJob),
+};
+/** { done, total, since } for the page; a backup's "done" is how much of the archive has been written. */
+function jobProgress(job) {
+  const pr = job.progress;
+  if (!pr) return null;
+  if (!pr.file) return { done: pr.done, total: pr.total, since: pr.since };
+  let done = 0;
+  try { done = fs.statSync(pr.file).size; } catch { /* not created yet */ }
+  return { done, total: pr.total, since: pr.since };
+}
+function runIndexJob(kind, work, onDone) {
+  const job = indexJob = { kind, state: "running", startedAt: Date.now(), canceled: false, cancel: null };
+  job.promise = work(job).then(
+    (file) => { job.state = "done"; job.file = file; },
+    (e) => {
+      job.state = e.canceled ? "canceled" : "failed";
+      job.error = e.canceled ? null : e.message;
+      if (!e.canceled) logMain(`${kind} failed: ${e.message}`);
+    },
+  ).finally(() => {
+    job.finishedAt = Date.now();
+    if (win && !win.isDestroyed()) win.webContents.send("index-job", jobView());
+    if (job.state === "done") onDone?.();
+  });
+}
+function cancelIndexJob() {
+  if (indexJob?.state !== "running") return;
+  indexJob.canceled = true;
+  indexJob.cancel?.();
+}
+ipcMain.handle("get-index-job", () => jobView());
+ipcMain.handle("cancel-index-job", () => cancelIndexJob());
+ipcMain.handle("reveal-backup", () => {
+  if (indexJob?.kind === "backup" && indexJob.state === "done") shell.showItemInFolder(indexJob.file);
+});
+// dialog titles arrive already translated by the page, as for the folder picker
+/** Open a chooser for a new job, holding the job slot meanwhile so a second request can't start one too. */
+async function chooseForJob(options) {
+  if (indexJob?.state === "running" || choosingJob) throw new Error("A backup or restore is already running");
+  choosingJob = true;
+  try {
+    const r = await dialog.showOpenDialog(win, options);
+    return r.canceled ? null : r.filePaths[0] || null;
+  } finally {
+    choosingJob = false;
+  }
+}
+ipcMain.handle("start-backup", async (_e, title) => {
+  const destDir = await chooseForJob({ title: String(title).slice(0, 200), properties: ["openDirectory", "createDirectory"] });
+  if (!destDir) return false;
+  const dataDir = app.getPath("userData");
+  runIndexJob("backup", (job) => createBackup({
+    dataDir, destDir, appVersion: app.getVersion(), job,
+    // the engine owns the open database, so it writes the consistent copy
+    snapshot: async (dir) => {
+      const made = (await (await engine("/api/snapshot", {})).json()).dir;
+      if (path.resolve(made) !== path.resolve(dir)) throw new Error("The index snapshot ended up in an unexpected place");
+    },
+  }));
+  return true;
+});
+ipcMain.handle("start-restore", async (_e, title) => {
+  const file = await chooseForJob({
+    title: String(title).slice(0, 200), properties: ["openFile"], filters: [{ name: "Magem", extensions: [BACKUP_EXT.slice(1)] }],
+  });
+  if (!file) return false;
+  runIndexJob("restore", (job) => stageRestore({
+    dataDir: app.getPath("userData"), file, job,
+    // the engine reads the staged database (always that one file), keeping this thread free for the UI
+    checkDb: async () => { await engine("/api/check_restore", {}); },
+  }), () => {
+    // the swap happens before the engine starts: relaunch (in the foreground, even if started in the tray)
+    setTimeout(() => { app.relaunch({ args: process.argv.slice(1).filter((a) => a !== HIDDEN_ARG) }); app.quit(); }, 1500);
+  });
+  return true;
+});
+
+async function confirmQuitDuringJob() {
+  if (confirmingQuit) return;
+  confirmingQuit = true;
+  const parent = win && !win.isDestroyed() ? win : undefined;
+  const { response } = await dialog.showMessageBox(parent, {
+    type: "warning", title: "Magem",
+    message: trayLabels[indexJob.kind === "restore" ? "jobQuitRestore" : "jobQuitBackup"],
+    buttons: [trayLabels.quit, trayLabels.keepRunning], defaultId: 1, cancelId: 1,
+  });
+  confirmingQuit = false;
+  if (response === 0) {
+    quitConfirmed = true;
+    cancelIndexJob();
+    // let it remove its half-written file before the process ends
+    await Promise.race([indexJob.promise, new Promise((r) => setTimeout(r, 5000))]);
+    app.quit();
+  } else if (!win) {
+    showWindow(); // the window was closed on the way to quitting: bring it back to show the progress
+  }
+}
 ipcMain.handle("open-file", async (_e, id) => {
   const err = await shell.openPath(await indexedPath(id));
   if (err) throw new Error(err);
@@ -422,8 +567,40 @@ app.whenReady().then(async () => {
     logMain("system wake");
     reviveWindow("wake");
   });
+  // leftovers of a backup/restore the app was killed in the middle of, then a restore waiting to be applied
+  const dataDir = app.getPath("userData");
+  try { cleanupLeftovers(dataDir); } catch (e) { logMain(`backup cleanup failed: ${e.message}`); }
+  let restored = false;
   try {
-    const port = await startBackend();
+    restored = applyStagedRestore(dataDir);
+    if (restored) logMain("restored the index from a backup");
+  } catch (e) {
+    logMain(`restore failed: ${e.message}`);
+    if (!e.indexIntact) {
+      // the data folder may be half-way between two indexes: don't let the engine touch it
+      dialog.showErrorBox("Magem", `Couldn't finish restoring the backup, so Magem won't open the index as it is.\n`
+        + `The previous index is kept in ${path.join(dataDir, "restore-previous")}.\n${e.message}`);
+      app.quit();
+      return;
+    }
+    dialog.showErrorBox("Magem", `Couldn't restore the backup, so the previous index is kept.\n${e.message}`);
+  }
+  try {
+    let port;
+    checkingRestore = restored;
+    try {
+      port = await startBackend();
+    } catch (e) {
+      // the engine couldn't open the restored index: once it has let go of the files, put the previous one back
+      if (restored) {
+        await stopBackend();
+        if (rollbackRestore(dataDir)) throw new Error(`Couldn't open the restored index, so the previous one was put back. Please open Magem again.\n${e.message}`);
+      }
+      throw e;
+    } finally {
+      checkingRestore = false;
+    }
+    if (restored) confirmRestore(dataDir); // the engine has the restored index open: the previous one can go
     baseUrl = `http://127.0.0.1:${port}`;
     await setAuthCookie();
     await applySavedPrefs();
@@ -455,7 +632,12 @@ app.on("window-all-closed", () => {
   }
   app.quit();
 });
-app.on("before-quit", () => {
+app.on("before-quit", (e) => {
+  if (indexJob?.state === "running" && !quitConfirmed) {
+    e.preventDefault();
+    confirmQuitDuringJob();
+    return;
+  }
   quitting = true;
   backend?.kill();
 });

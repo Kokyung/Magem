@@ -21,6 +21,10 @@ const EMBED_BATCH = 4;
 const WORKERS = 3;
 const NAME_BATCH = 32;
 const OCR_WORKERS = 2;
+// Seconds of work per file (one worker), used for the time-left estimate before a run has measured its own.
+// Videos take far longer than photos, which is why they are counted apart. Replaced by real measurements,
+// which are kept across runs.
+const PACE_GUESS = { image: 1.5, video: 20, ocrImage: 0.6, ocrVideo: 6, name: 0.01 };
 const OCR_MAX_FRAMES = 40; // per video
 const OCR_MAX_CHARS = 1000;
 
@@ -129,6 +133,12 @@ export class Index {
     if (!cols("files").includes("ocr_done")) this.db.exec("ALTER TABLE files ADD COLUMN ocr_done INTEGER DEFAULT 0");
     if (!cols("vectors").includes("text")) this.db.exec("ALTER TABLE vectors ADD COLUMN text TEXT");
     this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle", ocr: { running: false, total: 0, done: 0 } };
+    const measured = this.pref("index.pace") || {};
+    this._pace = { ...PACE_GUESS, ...measured };
+    this._paceMeasured = new Set(Object.keys(measured)); // the rest are still guesses
+    this._left = { image: 0, video: 0 }; // files of this run still to index
+    this._thumbOps = 0;          // thumbnail writes/deletions in flight
+    this._thumbsPaused = null;   // a promise while a backup copies the thumbnails
     this._stop = false;
     this._running = null;
     this._matrix = null;
@@ -157,6 +167,50 @@ export class Index {
     return Object.fromEntries(this.db.prepare("SELECT key, value FROM prefs").all().map((r) => [r.key, JSON.parse(r.value)]));
   }
 
+  /** Thumbnail writes and deletions go through here, so a backup can hold them while it takes its copy. */
+  async _thumbOp(fn) {
+    while (this._thumbsPaused) await this._thumbsPaused;
+    this._thumbOps++;
+    try { return await fn(); } finally { this._thumbOps--; }
+  }
+  _removeThumb(thumb) {
+    this._thumbOp(() => fs.promises.rm(this._thumbPath(thumb), { force: true })).catch(() => {});
+  }
+
+  /** A thumbnail's file; only ever inside the thumbs folder, whatever the database says (e.g. a restored backup). */
+  _thumbPath(thumb) {
+    return path.join(this.thumbDir, path.basename(String(thumb)));
+  }
+
+  /**
+   * A copy of the database and thumbnails, taken at one moment, for a backup (into backup-tmp/). Thumbnail
+   * writes wait meanwhile (database writes are already excluded: VACUUM INTO runs in one go), so the copy
+   * never holds a half-written thumbnail or misses one the database still points to.
+   */
+  async snapshot() {
+    const dir = path.join(this.dataDir, "backup-tmp");
+    let release;
+    this._thumbsPaused = new Promise((r) => { release = r; });
+    try {
+      while (this._thumbOps > 0) await new Promise((r) => setTimeout(r, 20));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.rmSync(path.join(dir, "index.db"), { force: true });
+      fs.rmSync(path.join(dir, "thumbs"), { recursive: true, force: true });
+      this.db.exec(`VACUUM INTO '${path.join(dir, "index.db").replace(/'/g, "''")}'`);
+      // copy-on-write clones where the disk supports them (APFS), plain copies elsewhere
+      fs.cpSync(this.thumbDir, path.join(dir, "thumbs"), { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
+    } finally {
+      this._thumbsPaused = null;
+      release();
+    }
+    return dir;
+  }
+
+  pref(key) {
+    const row = this.db.prepare("SELECT value FROM prefs WHERE key=?").get(key);
+    return row ? JSON.parse(row.value) : null;
+  }
+
   setPref(key, value) {
     this.db.prepare("INSERT INTO prefs VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, JSON.stringify(value));
   }
@@ -180,7 +234,7 @@ export class Index {
 
   removeExcluded(p) {
     this.db.prepare("DELETE FROM excluded WHERE path=?").run(p);
-    this.start(); // bring its files back
+    this.resume(); // bring its files back (the user asked for it, so a pause ends here)
   }
 
   _isExcluded(file) {
@@ -201,7 +255,7 @@ export class Index {
     const delF = this.db.prepare("DELETE FROM files WHERE id=?");
     for (const id of ids) {
       for (const { thumb } of thumbs.all(id, id)) {
-        if (thumb && !keep.has(thumb)) fs.rm(path.join(this.thumbDir, thumb), { force: true }, () => {});
+        if (thumb && !keep.has(thumb)) this._removeThumb(thumb);
       }
       delV.run(id);
       delF.run(id);
@@ -224,6 +278,21 @@ export class Index {
   }
 
   stop() { this._stop = true; }
+
+  /** Paused by the user: automatic runs (launch, coming back to the window) wait until resume(). */
+  get paused() { return this.pref("index.paused") === true; }
+  pause() {
+    this.setPref("index.paused", true);
+    this.stop();
+  }
+  resume() {
+    this.setPref("index.paused", false);
+    return this.start();
+  }
+  /** A run nobody asked for explicitly: skipped while paused. */
+  startAuto() {
+    return this.paused ? false : this.start();
+  }
 
   _hasFolder(folder) {
     return !!this.db.prepare("SELECT 1 FROM folders WHERE path=?").get(folder);
@@ -298,6 +367,7 @@ export class Index {
       // images first: quick results, then the slower videos
       todo.sort((a, b) => (a.kind === b.kind ? a.path.localeCompare(b.path) : a.kind === "image" ? -1 : 1));
       Object.assign(pr, { phase: todo.length ? "loading-model" : "indexing", total: todo.length });
+      this._left = { image: todo.filter((it) => it.kind === "image").length, video: todo.filter((it) => it.kind === "video").length };
       if (todo.length) {
         await embedder.load();
         pr.phase = "indexing";
@@ -309,7 +379,11 @@ export class Index {
       let next = 0;
       const worker = async () => {
         while (!this._stop && next < todo.length) {
-          await this._indexOne(todo[next++]);
+          const it = todo[next++];
+          const t0 = Date.now();
+          await this._indexOne(it);
+          this._measure(it.kind, Date.now() - t0);
+          this._left[it.kind]--;
           pr.done++;
         }
       };
@@ -318,13 +392,49 @@ export class Index {
       await ocrBacklog;
       pr.phase = "ocr";
       if (!this._stop) await this._enrichOcr(); // files indexed in this run
+      // a run that got to the end (not stopped): when the index was last complete, shown in the status line
+      if (!this._stop) this.setPref("index.lastRun", { finishedAt: Date.now() });
     } catch (e) {
       pr.errors++;
       pr.fatal = e.message;
     } finally {
       Object.assign(pr, { running: false, phase: "idle", current: "" });
+      this._left = { image: 0, video: 0 };
       this._dirty = true;
+      // the next run's estimate starts from these (only kinds actually measured)
+      this.setPref("index.pace", Object.fromEntries([...this._paceMeasured].map((k) => [k, this._pace[k]])));
     }
+  }
+
+  /** Running average of seconds per file (per worker) for one kind of work; the first measurement replaces the guess. */
+  _measure(kind, ms) {
+    const s = ms / 1000;
+    this._pace[kind] = this._paceMeasured.has(kind) ? this._pace[kind] * 0.8 + s * 0.2 : s;
+    this._paceMeasured.add(kind);
+  }
+
+  /**
+   * Seconds until the whole run is done: file names, photos and videos, and text recognition, which runs on
+   * already-indexed files alongside the indexing and on this run's new files after it. null when unknown.
+   */
+  eta() {
+    const pr = this.progress;
+    if (!pr.running || pr.phase === "scanning") return null;
+    const p = this._pace;
+    const left = this._left;
+    // photos go first, then videos: the workers split each stretch, but a few videos can't use all of them
+    const indexing = (left.image * p.image) / WORKERS + (left.video ? (left.video * p.video) / Math.min(WORKERS, left.video) : 0);
+    const newFiles = left.image + left.video;
+    const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name;
+    let ocrBacklog = 0, ocrNew = 0;
+    if (ocr.ready()) {
+      const pending = Object.fromEntries(this.db.prepare(
+        "SELECT kind, COUNT(*) AS n FROM files WHERE status='done' AND ocr_done=0 GROUP BY kind").all().map((r) => [r.kind, r.n]));
+      ocrBacklog = ((pending.image || 0) * p.ocrImage + (pending.video || 0) * p.ocrVideo) / OCR_WORKERS;
+      ocrNew = (left.image * p.ocrImage + left.video * p.ocrVideo) / OCR_WORKERS;
+    }
+    // the backlog's text recognition overlaps the indexing; the new files' comes after it
+    return Math.round(names + Math.max(indexing, ocrBacklog) + ocrNew);
   }
 
   async _indexOne(it) {
@@ -333,7 +443,7 @@ export class Index {
     try {
       const { duration, thumb, vecs } = it.kind === "image" ? await this._processImage(it.path) : await this._processVideo(it.path);
       if (!this._hasFolder(it.folder) || this._isExcluded(it.path)) { // removed/excluded while being processed
-        for (const t of new Set([thumb, ...vecs.map((v) => v.thumb)])) fs.rm(path.join(this.thumbDir, t), { force: true }, () => {});
+        for (const t of new Set([thumb, ...vecs.map((v) => v.thumb)])) if (t) this._removeThumb(t);
         return;
       }
       const old = this.db.prepare("SELECT id FROM files WHERE path=?").get(it.path);
@@ -364,7 +474,7 @@ export class Index {
 
   async _processImage(p) {
     const thumb = thumbName(p);
-    const img = await media.prepareImage(p, path.join(this.thumbDir, thumb));
+    const img = await this._thumbOp(() => media.prepareImage(p, path.join(this.thumbDir, thumb)));
     const [vec] = await embedder.embedImages([img]);
     return { duration: null, thumb, vecs: [{ modality: "image", t: null, tEnd: null, thumb, vec }] };
   }
@@ -387,7 +497,7 @@ export class Index {
           const jpg = await media.videoFrame(p, t);
           if (!jpg.length) continue;
           const thumb = thumbName(p, t.toFixed(2));
-          batch.push({ t, thumb, img: await media.prepareImage(jpg, path.join(this.thumbDir, thumb)) });
+          batch.push({ t, thumb, img: await this._thumbOp(() => media.prepareImage(jpg, path.join(this.thumbDir, thumb))) });
         } catch { /* unreadable frame: skip */ }
       }
       if (!batch.length) continue;
@@ -439,7 +549,9 @@ export class Index {
     const mark = this.db.prepare("UPDATE files SET name_done=1 WHERE id=?");
     for (let i = 0; i < todo.length && !this._stop; i += NAME_BATCH) {
       const batch = todo.slice(i, i + NAME_BATCH).map((f) => ({ ...f, ...nameDoc(f.path, f.folder) }));
+      const t0 = Date.now();
       const vecs = await embedder.embedDocs(batch.map((b) => b.doc));
+      this._measure("name", (Date.now() - t0) / batch.length);
       this.db.exec("BEGIN");
       batch.forEach((f, k) => { ins.run(f.id, f.thumb, vecBlob(vecs[k]), f.display, f.id); mark.run(f.id); });
       this.db.exec("COMMIT");
@@ -461,8 +573,10 @@ export class Index {
     const worker = async () => {
       while (!this._stop && next < todo.length) {
         const f = todo[next++];
+        const t0 = Date.now();
         try {
           if (!(await this._ocrFile(f))) continue; // stopped midway: retry on the next run
+          this._measure(f.kind === "video" ? "ocrVideo" : "ocrImage", Date.now() - t0);
         } catch {
           this.progress.errors++; // unreadable now; don't retry on every launch
         }

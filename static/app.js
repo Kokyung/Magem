@@ -62,6 +62,12 @@ const fmtTime = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(s % 60).padStart(2, "0");
   return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
 };
+/** A moment in the UI language: just the time if it was today, otherwise date and time. */
+function fmtWhen(ms) {
+  const d = new Date(ms);
+  const today = new Date().toDateString() === d.toDateString();
+  return new Intl.DateTimeFormat(lang, today ? { timeStyle: "short" } : { dateStyle: "medium", timeStyle: "short" }).format(d);
+}
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 /** Escape text and mark the query's words in it. */
@@ -278,12 +284,28 @@ function tile(r, list, i) {
     ? `<span class="caption"><span>${highlight(r.text.replace(/\s*\n\s*/g, " · "), state.query)}</span></span>`
     : `<span class="name">${esc(r.name)}</span>`;
   b.dataset.id = r.id;
-  b.innerHTML = `<img loading="lazy" src="/thumb/${r.thumb}" alt="">${badges}${caption}`
+  b.innerHTML = `<img loading="lazy" src="/thumb/${esc(r.thumb)}" alt="">${badges}${caption}`
     + `<span class="check" role="checkbox" aria-label="${esc(t("select"))}"></span>`;
   b.classList.toggle("selected", selection.ids.has(r.id));
   b.querySelector(".check").setAttribute("aria-checked", selection.ids.has(r.id));
-  b.querySelector(".check").onclick = (e) => { e.stopPropagation(); toggleSelected(r.id); };
-  b.onclick = () => { commitRecent(); openViewer(list, i); };
+  const check = b.querySelector(".check");
+  check.onmousedown = (e) => beginDragSelect(e, b); // toggles this tile; dragging extends to the tiles passed over
+  check.onclick = (e) => e.stopPropagation();
+  b.onclick = () => {
+    if (suppressTileClick) return; // the end of a checkbox sweep, not a click on the picture
+    commitRecent();
+    openViewer(list, i);
+  };
+  // dragged onto the search box: search with this file's vector instead of downloading its thumbnail
+  // dragged out: the main process starts a native drag carrying the files themselves (to Finder, File Explorer,
+  // mail, a web page…); a selected tile takes the whole selection along
+  b.ondragstart = (e) => {
+    e.preventDefault();
+    const ids = selection.ids.has(r.id) && selection.ids.size > 1 ? [...selection.ids] : [r.id];
+    if (ids.length > MAX_COPY) return toast(t("toast.tooMany", { max: num(MAX_COPY), n: num(ids.length) }), 4000);
+    outgoingDrag = { r };
+    window.mmf.startFileDrag(ids, r.thumb);
+  };
   b.oncontextmenu = (e) => { e.preventDefault(); fileMenu(e, r); };
   return b;
 }
@@ -368,6 +390,72 @@ function updateSelection() {
     el.classList.toggle("selected", on);
     el.querySelector(".check")?.setAttribute("aria-checked", on);
   }
+}
+
+// ---------- drag-select: press a tile's checkbox and sweep over other tiles ----------
+// Like photo apps, the sweep covers every tile between the first and the current one in reading order
+// (within that grid). It adds when the first tile was unselected, and removes when it was selected.
+let dragSel = null;
+let suppressTileClick = false;
+function beginDragSelect(e, tileEl) {
+  if (e.button !== 0) return;
+  e.preventDefault(); // no native image drag or text selection
+  e.stopPropagation();
+  // ids, not elements: indexing refreshes may redraw the grid in the middle of a sweep
+  const ids = [...tileEl.parentElement.querySelectorAll(".tile[data-id]")].map((el) => +el.dataset.id);
+  const anchor = ids.indexOf(+tileEl.dataset.id);
+  dragSel = {
+    ids, anchor, current: anchor, moved: false, x: e.clientX, y: e.clientY,
+    adding: !selection.ids.has(+tileEl.dataset.id), before: new Set(selection.ids), raf: 0,
+  };
+  document.body.classList.add("drag-selecting");
+  applyDragSelect();
+  window.addEventListener("mousemove", moveDragSelect);
+  window.addEventListener("mouseup", endDragSelect, { once: true });
+  window.addEventListener("blur", endDragSelect, { once: true });
+  dragSel.raf = requestAnimationFrame(autoScrollDragSelect);
+}
+function applyDragSelect() {
+  const { ids, anchor, current, adding, before } = dragSel;
+  selection.ids.clear();
+  for (const id of before) selection.ids.add(id);
+  for (let i = Math.min(anchor, current); i <= Math.max(anchor, current); i++) {
+    if (adding) selection.ids.add(ids[i]); else selection.ids.delete(ids[i]);
+  }
+  updateSelection();
+}
+function pickDragTile() {
+  const el = document.elementFromPoint(dragSel.x, dragSel.y)?.closest(".tile[data-id]");
+  const i = el ? dragSel.ids.indexOf(+el.dataset.id) : -1;
+  if (i >= 0 && i !== dragSel.current) {
+    dragSel.current = i;
+    dragSel.moved = true;
+    applyDragSelect();
+  }
+}
+function moveDragSelect(e) {
+  dragSel.x = e.clientX;
+  dragSel.y = e.clientY;
+  pickDragTile();
+}
+/** Near the top (below the sticky header) or bottom edge, scroll so the sweep can continue. */
+function autoScrollDragSelect() {
+  if (!dragSel) return;
+  const top = document.querySelector(".top").getBoundingClientRect().bottom + 40;
+  const bottom = innerHeight - 40;
+  const dy = dragSel.y < top ? -(top - dragSel.y) / 3 : dragSel.y > bottom ? (dragSel.y - bottom) / 3 : 0;
+  if (dy) { window.scrollBy(0, Math.max(-30, Math.min(30, dy))); pickDragTile(); }
+  dragSel.raf = requestAnimationFrame(autoScrollDragSelect);
+}
+function endDragSelect() {
+  if (!dragSel) return;
+  window.removeEventListener("mousemove", moveDragSelect);
+  window.removeEventListener("mouseup", endDragSelect);
+  window.removeEventListener("blur", endDragSelect);
+  cancelAnimationFrame(dragSel.raf);
+  document.body.classList.remove("drag-selecting");
+  if (dragSel.moved) { suppressTileClick = true; setTimeout(() => { suppressTileClick = false; }); }
+  dragSel = null;
 }
 
 const menu = $("contextMenu");
@@ -457,7 +545,7 @@ function openViewer(list, i) {
     v.controls = true;
     v.autoplay = true;
     v.onerror = () => {
-      media.innerHTML = `<div class="fallback"><img src="/thumb/${r.thumb}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
+      media.innerHTML = `<div class="fallback"><img src="/thumb/${esc(r.thumb)}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
     };
     media.appendChild(v);
   }
@@ -472,7 +560,7 @@ function openViewer(list, i) {
       const btn = document.createElement("button");
       btn.className = "moment" + (m.t === r.t ? " on" : "");
       const icon = m.modality === "audio" ? "🔊 " : m.modality === "ocr" ? "T " : "";
-      btn.innerHTML = `<img src="/thumb/${m.thumb}" alt=""><span>${icon}${fmtTime(m.t)}</span>`;
+      btn.innerHTML = `<img src="/thumb/${esc(m.thumb)}" alt=""><span>${icon}${fmtTime(m.t)}</span>`;
       if (m.text) btn.title = m.text;
       btn.onclick = () => {
         const v = media.querySelector("video");
@@ -513,6 +601,11 @@ $("vOpen").onclick = fileAction(window.mmf.openFile);
 $("vSimilar").onclick = () => {
   const r = viewerResult();
   closeViewer();
+  searchSimilar(r);
+};
+
+/** Search with an indexed file's own vector (the viewer's "Find similar", or a tile dropped on the search). */
+function searchSimilar(r) {
   inputSeq++;
   hideRecent();
   state.imageBlob = null;
@@ -524,7 +617,7 @@ $("vSimilar").onclick = () => {
   showQueryImage(`/thumb/${r.thumb}`); // the chosen picture becomes the search, like "search by image"
   runSearch();
   window.scrollTo({ top: 0 });
-};
+}
 
 $("viewerMedia").oncontextmenu = (e) => {
   const r = viewerResult();
@@ -534,6 +627,11 @@ $("viewerMedia").oncontextmenu = (e) => {
 };
 
 document.addEventListener("keydown", (e) => {
+  // the backup modal owns the keyboard while it is open: Esc closes it once the job is over
+  if (!$("jobModal").classList.contains("hidden")) {
+    if (e.key === "Escape") closeIndexJob();
+    return;
+  }
   // any key dismisses an open menu (it acts on the file it was opened for, which arrows would change)
   if (menuOpen()) { closeMenu(); if (e.key === "Escape") return; }
   const { list, index } = state.viewer;
@@ -589,7 +687,17 @@ async function prune() {
     // engine unreachable: the next search filters deleted files anyway
   }
 }
-window.addEventListener("focus", () => { pruneUnavailable(); if (!isActive()) loadBrowse(); });
+window.addEventListener("focus", () => { pruneUnavailable(); if (!isActive()) loadBrowse(); autoIndex(); });
+
+// Coming back to the window also picks up new and changed files, like a launch does: only when there are
+// indexed folders, nothing is running, and not more than every 30 s (switching apps back and forth).
+let lastAutoIndex = Date.now(); // the launch has just started a run
+function autoIndex() {
+  const s = lastStatus;
+  if (!s?.folders.length || s.paused || s.progress.running || Date.now() - lastAutoIndex < 30000) return;
+  lastAutoIndex = Date.now();
+  post("/api/reindex").then(refreshStatus, () => {});
+}
 document.addEventListener("visibilitychange", () => { if (!document.hidden) pruneUnavailable(); });
 
 // ---------- folder browser (start screen) ----------
@@ -940,6 +1048,11 @@ document.addEventListener("paste", (e) => {
 });
 let dragDepth = 0;
 const DROP_TYPES = ["Files", "text/uri-list", "text/html"];
+// the tile last dragged out as files: dropped back on this window, it searches with the file's own vector
+// (like "Find similar") instead of uploading the file. Recognised by the dropped file's path, so another
+// file that merely has the same name isn't mistaken for it, however long ago the drag was.
+let outgoingDrag = null;
+const samePath = (a, b) => !!a && !!b && a.normalize("NFC") === b.normalize("NFC");
 document.addEventListener("dragenter", (e) => {
   if (DROP_TYPES.some((t) => e.dataTransfer.types.includes(t))) { dragDepth++; $("dropzone").classList.remove("hidden"); }
 });
@@ -950,6 +1063,15 @@ document.addEventListener("drop", (e) => {
   dragDepth = 0;
   $("dropzone").classList.add("hidden");
   const files = [...e.dataTransfer.files];
+  const own = outgoingDrag;
+  if (own && files.some((f) => samePath(window.mmf.pathForFile?.(f), own.r.path))) {
+    outgoingDrag = null;
+    const { r } = own;
+    // let go on the tile it came from: the drag was abandoned, not a search
+    if (+e.target.closest?.(".tile[data-id]")?.dataset.id === r.id) return;
+    if (r.vid != null) return searchSimilar(r);
+    return setImageFromUrl(`/thumb/${r.thumb}`); // no picture vector (e.g. a silent, frameless video)
+  }
   const f = files.find((x) => x.type.startsWith("image/")) || files[0];
   if (f) return setImage(f);
   const url = droppedImageUrl(e.dataTransfer);
@@ -973,8 +1095,10 @@ async function setImageFromUrl(url) {
   const seq = ++inputSeq;
   toast(t("toast.fetchingImage"));
   try {
-    // data: URLs are local; web images go through the engine (the page itself can't fetch other sites)
-    const res = url.startsWith("data:") ? await fetch(url) : await fetch(`/api/fetch_image?url=${encodeURIComponent(url)}`);
+    // data: URLs and our own pages are fetched directly (the engine's proxy has no session cookie, so its
+    // own addresses would be refused); other sites go through the engine, as the page can't fetch them itself
+    const local = url.startsWith("data:") || new URL(url, location.href).origin === location.origin;
+    const res = local ? await fetch(url) : await fetch(`/api/fetch_image?url=${encodeURIComponent(url)}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     const blob = await res.blob();
     if (seq === inputSeq) setImage(blob); // otherwise the user has moved on to another search
@@ -1029,6 +1153,8 @@ function applyLanguage(code) {
   }
   const platform = window.mmf?.platform;
   $("vReveal").textContent = t(platform === "darwin" ? "viewer.revealMac" : platform === "win32" ? "viewer.revealWin" : "viewer.revealLinux");
+  $("jobReveal").textContent = $("vReveal").textContent;
+  if (shownJob) renderIndexJob(shownJob);
   $("langSelect").value = lang;
   updateSortDir();
   updatePlaceholder();
@@ -1038,10 +1164,103 @@ function applyLanguage(code) {
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
   if (lastStatus) renderStatus(lastStatus);
   // once the saved language is known: the main process keeps these for a start without a window
-  if (prefsLoaded) window.mmf?.setTrayLabels?.({ open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice") });
+  if (prefsLoaded) window.mmf?.setTrayLabels?.({
+    open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice"),
+    jobQuitBackup: t("backup.quitBackup"), jobQuitRestore: t("backup.quitRestore"), keepRunning: t("backup.cancel"),
+  });
 }
 
 for (const [code, name] of LANGUAGES) $("langSelect").add(new Option(name, code));
+
+// ---------- dropdowns ----------
+// A styled <select>'s native pop-up drifts sideways on macOS (it lines its text up with the control's text, not
+// with the box), so each one gets a button and a list of our own. The <select> stays the source of truth: the
+// rest of the code keeps reading .value and listening for "change".
+const nativeSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+let openDropdown = null; // { select, button, list }
+function enhanceSelect(select) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dropdown-btn";
+  button.setAttribute("aria-haspopup", "listbox");
+  button.setAttribute("aria-expanded", "false");
+  select.after(button);
+  select.hidden = true;
+  const sync = () => { button.textContent = select.selectedOptions[0]?.textContent || ""; };
+  // values set from code (saved settings) and option text changed by a language switch both show on the button
+  Object.defineProperty(select, "value", {
+    configurable: true,
+    get() { return nativeSelectValue.get.call(this); },
+    set(v) { nativeSelectValue.set.call(this, v); sync(); },
+  });
+  new MutationObserver(sync).observe(select, { childList: true, subtree: true, characterData: true });
+  select.addEventListener("change", sync);
+  button.onclick = () => (openDropdown?.select === select ? closeDropdown() : showDropdown(select, button));
+  button.onkeydown = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); showDropdown(select, button); }
+  };
+  sync();
+}
+function showDropdown(select, button) {
+  closeDropdown();
+  closeMenu();
+  const list = document.createElement("div");
+  list.className = "dropdown-menu";
+  list.setAttribute("role", "listbox");
+  for (const opt of select.options) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", opt.selected);
+    item.textContent = opt.textContent;
+    item.onclick = () => {
+      closeDropdown();
+      button.focus();
+      if (select.value === opt.value) return;
+      select.value = opt.value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    list.appendChild(item);
+  }
+  list.onkeydown = (e) => {
+    const items = [...list.children];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); items[Math.min(i + 1, items.length - 1)].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); items[Math.max(i - 1, 0)].focus(); }
+    else if (e.key === "Escape" || e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation(); // not the drawer's or the viewer's Esc
+      closeDropdown();
+      button.focus();
+    }
+  };
+  document.body.appendChild(list);
+  // right under the button, lined up with its edge (the far edge in right-to-left), kept on screen
+  const r = button.getBoundingClientRect();
+  list.style.minWidth = `${r.width}px`;
+  const { width, height } = list.getBoundingClientRect();
+  const left = document.documentElement.dir === "rtl" ? r.right - width : r.left;
+  list.style.left = `${Math.max(4, Math.min(left, innerWidth - width - 4))}px`;
+  list.style.top = `${r.bottom + 4 + height <= innerHeight - 4 ? r.bottom + 4 : Math.max(4, r.top - 4 - height)}px`;
+  button.setAttribute("aria-expanded", "true");
+  openDropdown = { select, button, list };
+  const current = list.querySelector('[aria-selected="true"]') || list.firstElementChild;
+  current?.focus();
+  current?.scrollIntoView({ block: "nearest" });
+}
+function closeDropdown() {
+  if (!openDropdown) return;
+  openDropdown.list.remove();
+  openDropdown.button.setAttribute("aria-expanded", "false");
+  openDropdown = null;
+}
+document.addEventListener("mousedown", (e) => {
+  if (openDropdown && !openDropdown.list.contains(e.target) && !openDropdown.button.contains(e.target)) closeDropdown();
+});
+document.addEventListener("scroll", (e) => { if (openDropdown && !openDropdown.list.contains(e.target)) closeDropdown(); }, true);
+window.addEventListener("resize", closeDropdown);
+window.addEventListener("blur", closeDropdown);
+for (const select of document.querySelectorAll("select")) enhanceSelect(select);
 $("langSelect").onchange = (e) => { store.set("mmf.lang", e.target.value); applyLanguage(e.target.value); };
 $("themeSelect").onchange = (e) => {
   store.set("mmf.theme", e.target.value);
@@ -1081,6 +1300,74 @@ $("backgroundCheck").onchange = (e) => {
   window.mmf.setRunInBackground(e.target.checked);
 };
 window.mmf?.onOpenSettings?.(() => openDrawer("settings")); // "Settings" in the tray menu
+
+// ---------- index backup / restore ----------
+// The main process runs the job; this modal shows it until it ends (or is canceled), asking for its state.
+let jobTimer = 0;
+let shownJob = null;
+async function pollIndexJob() {
+  let job;
+  try { job = await window.mmf.getIndexJob(); } catch { return; }
+  renderIndexJob(job);
+}
+function renderIndexJob(job) {
+  clearTimeout(jobTimer);
+  shownJob = job;
+  const modal = $("jobModal");
+  if (!job || job.state === "canceled") {
+    if (job && !modal.classList.contains("hidden")) toast(t("backup.canceled"));
+    modal.classList.add("hidden");
+    return;
+  }
+  const restore = job.kind === "restore";
+  const running = job.state === "running";
+  const done = job.state === "done";
+  modal.classList.remove("hidden");
+  closeMenu();
+  $("jobSpinner").classList.toggle("hidden", !running && !(done && restore));
+  $("jobTitle").textContent = t(running ? (restore ? "backup.restoring" : "backup.running")
+    : done ? (restore ? "backup.restoreDone" : "backup.done")
+    : restore ? "backup.restoreFailed" : "backup.failed");
+  const end = job.finishedAt || Date.now();
+  $("jobDetail").textContent = running
+    // time left and progress, always both: placeholders until there is enough to estimate
+    ? `${t("remaining", { time: jobSecondsLeft(job.progress) == null ? "--:--:--" : fmtTime(jobSecondsLeft(job.progress)) })}`
+      + ` · ${job.progress?.total ? Math.min(99, Math.floor((job.progress.done / job.progress.total) * 100)) : 0}%`
+    : done && !restore ? `${job.file}\n${t("backup.doneDetail", { time: fmtWhen(job.finishedAt), duration: fmtTime((end - job.startedAt) / 1000) })}`
+    : done ? ""
+    : job.error || ""; // errors stay in English
+  $("jobCancel").classList.toggle("hidden", !running);
+  $("jobClose").classList.toggle("hidden", running || (done && restore)); // a finished restore restarts the app
+  $("jobReveal").classList.toggle("hidden", !(done && !restore));
+  if (running) jobTimer = setTimeout(pollIndexJob, 500);
+}
+/** Seconds left from the pace since the archive (or the unpacking) started; null until a couple of seconds in. */
+function jobSecondsLeft(pr) {
+  if (!pr?.total || !pr.done || !pr.since) return null;
+  const elapsed = Date.now() - pr.since;
+  if (elapsed < 2000 || pr.done >= pr.total) return null;
+  return ((pr.total - pr.done) * elapsed) / pr.done / 1000;
+}
+
+function closeIndexJob() {
+  if (shownJob?.state === "running") return;
+  shownJob = null; // dismissed: a language change mustn't bring it back
+  $("jobModal").classList.add("hidden");
+}
+const startIndexJob = (start) => async () => {
+  closeDrawers();
+  try {
+    if (await start()) pollIndexJob();
+  } catch (e) { toast(ipcMessage(e), 4000); }
+};
+$("backupBtn").onclick = startIndexJob(() => window.mmf.startBackup(t("backup.pickFolder")));
+$("restoreBtn").onclick = startIndexJob(() => confirm(t("backup.restoreConfirm")) && window.mmf.startRestore(t("backup.pickFile")));
+$("jobCancel").onclick = () => window.mmf.cancelIndexJob();
+$("jobClose").onclick = closeIndexJob;
+$("jobReveal").onclick = () => window.mmf.revealBackup();
+window.mmf?.onIndexJob?.(renderIndexJob); // the end of a job, even if this page wasn't asking
+// e.g. the window was reopened in the middle of a backup
+window.mmf?.getIndexJob?.().then((job) => { if (job?.state === "running") renderIndexJob(job); }, () => {});
 
 // ---------- drawers, folders & status ----------
 function openDrawer(id) {
@@ -1127,8 +1414,21 @@ $("pathForm").onsubmit = (e) => {
   const p = $("pathInput").value.trim();
   if (p) { addFolder(p); $("pathInput").value = ""; }
 };
-$("reindex").onclick = async () => { const r = await post("/api/reindex"); toast(t(r.started ? "toast.reindex" : "toast.alreadyIndexing")); refreshStatus(); };
-$("stopIndex").onclick = async () => { await post("/api/stop"); toast(t("toast.stopping")); };
+// ▶ / ⏸ next to the status line: a pause holds (launches and coming back to the window don't restart it) until ▶
+let pauseRequested = false; // shown at once, before the busy engine answers
+$("indexToggle").onclick = async () => {
+  const pausing = !!lastStatus?.progress.running;
+  if (pausing) {
+    pauseRequested = true;
+    $("indexToggle").classList.add("pausing");
+  }
+  try { await post(pausing ? "/api/pause" : "/api/resume"); } catch (e) {
+    pauseRequested = false;
+    $("indexToggle").classList.remove("pausing");
+    toast(e.message);
+  }
+  refreshStatus();
+};
 
 let lastDone = -1, wasRunning = false, lastStatus = null;
 async function refreshStatus() {
@@ -1160,6 +1460,13 @@ async function refreshStatus() {
 /** Status line, progress bar and the folder drawer, drawn from the last /api/status answer. */
 function renderStatus(s) {
   const { progress: p, folders, stats } = s;
+  const toggle = $("indexToggle");
+  toggle.classList.toggle("hidden", !folders.length);
+  toggle.classList.toggle("running", p.running);
+  // paused but still running = finishing the file in hand before it stops (the engine keeps both flags)
+  if (!p.running) pauseRequested = false;
+  toggle.classList.toggle("pausing", p.running && (!!s.paused || pauseRequested));
+  toggle.setAttribute("aria-label", t(p.running ? "index.pause" : "index.start"));
   const counts = t("status.counts", { photos: num(stats.images), videos: num(stats.videos) });
   const eng = s.engine;
   const engLabel = eng.status === "ready" ? `${s.model} · ${eng.device in DEVICE_KEYS ? t(DEVICE_KEYS[eng.device]) : eng.device}`
@@ -1174,12 +1481,21 @@ function renderStatus(s) {
     const main = p.phase === "scanning" ? t("phase.scanning")
       : p.phase === "loading-model" ? t("phase.loadingModel")
       : p.phase === "ocr" ? (ocrPart ? "" : t("phase.ocrPreparing"))
-      : `${t(p.phase === "names" ? "phase.names" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`;
-    $("status").textContent = [main, ocrPart, counts].filter(Boolean).join(" · ");
+      : `${t(p.phase === "names" ? "phase.names" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
+    // the time left for the whole run (indexing, file names and text recognition together, estimated by the
+    // engine), in bold right after what is being worked on
+    const eta = s.eta != null ? t("eta", { time: fmtTime(s.eta) }) : "";
+    const parts = [main, ocrPart, counts].filter(Boolean);
+    if (eta) parts.splice(main ? 1 : ocrPart ? 1 : 0, 0, { bold: eta });
+    $("status").replaceChildren(...parts.flatMap((part, i) => {
+      const node = typeof part === "string" ? part : Object.assign(document.createElement("b"), { textContent: part.bold });
+      return i ? [" · ", node] : [node];
+    }));
     $("progress").classList.remove("hidden");
     $("progressBar").style.width = `${p.phase === "ocr" && o.total ? Math.round((o.done / o.total) * 100) : pct}%`;
   } else {
-    $("status").textContent = `${counts} · ${engLabel}`;
+    const done = s.paused ? t("status.paused") : s.lastRun ? t("status.indexedAt", { time: fmtWhen(s.lastRun.finishedAt) }) : "";
+    $("status").textContent = [counts, done, engLabel].filter(Boolean).join(" · ");
     $("progress").classList.add("hidden");
   }
 

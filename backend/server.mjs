@@ -6,6 +6,7 @@ import * as embedder from "./embedder.mjs";
 import { VISUAL, VISUAL_AUDIO, toPercent } from "./indexer.mjs";
 import { badRequest } from "./errors.mjs";
 import { clipboardPng, prepareImage } from "./media.mjs";
+import { checkIndexDb } from "./db-check.mjs";
 
 // Results below this relevance (%) are not shown at all.
 const MIN_RELEVANCE = 40;
@@ -152,6 +153,7 @@ export function createServer({ index, staticDir, token, modelName }) {
         if (p === "/api/status") {
           return json(res, {
             progress: index.progress, folders: index.folders(), excluded: index.excluded(), stats: index.stats(),
+            lastRun: index.pref("index.lastRun"), eta: index.eta(), paused: index.paused,
             model: modelName, engine: embedder.engine,
           });
         }
@@ -199,7 +201,7 @@ export function createServer({ index, staticDir, token, modelName }) {
         const body = JSON.parse((await readBody(req, 1 << 20)).toString() || "{}");
         if (p === "/api/folders") {
           const added = index.addFolder(body.path);
-          index.start();
+          index.resume(); // adding a folder means "index this", even while paused
           return json(res, { ok: true, path: added });
         }
         if (p === "/api/folders/remove") {
@@ -216,8 +218,9 @@ export function createServer({ index, staticDir, token, modelName }) {
           index.removeExcluded(body.path);
           return json(res, { ok: true });
         }
-        if (p === "/api/reindex") return json(res, { started: index.start() });
-        if (p === "/api/stop") { index.stop(); return json(res, { ok: true }); }
+        if (p === "/api/reindex") return json(res, { started: index.startAuto() }); // coming back to the window
+        if (p === "/api/pause") { index.pause(); return json(res, { ok: true }); }
+        if (p === "/api/resume") return json(res, { started: index.resume() });
         if (p === "/api/unavailable") {
           if (!Array.isArray(body.ids) || body.ids.length > 1000) return json(res, { error: "ids: send at most 1000 at a time" }, 400);
           const ids = body.ids.map(Number).filter(Number.isInteger);
@@ -243,6 +246,11 @@ export function createServer({ index, staticDir, token, modelName }) {
           const png = await clipboardPng(row.path);
           res.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length });
           return res.end(png);
+        }
+        if (p === "/api/snapshot") return json(res, { dir: await index.snapshot() });
+        if (p === "/api/check_restore") { // only ever the staged database, whatever the request says
+          checkIndexDb(path.join(index.dataDir, "restore-staging", "index.db"));
+          return json(res, { ok: true });
         }
         if (p === "/api/folder") return json(res, { path: body.path, root: index.browsableRoot(body.path) });
       }

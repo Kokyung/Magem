@@ -81,6 +81,7 @@ Generated from the installed `package.json` files of every production dependency
 | `@types/node@24.19.1` | MIT |
 | `adm-zip@0.6.1` | MIT |
 | `agent-base@6.0.2` | MIT |
+| `buffer-crc32@1.0.0` | MIT |
 | `buffer-from@1.1.2` | MIT |
 | `caseless@0.12.0` | Apache-2.0 |
 | `concat-stream@2.0.0` | MIT |
@@ -113,6 +114,7 @@ Generated from the installed `package.json` files of every production dependency
 | `onnxruntime-node@1.30.0` | MIT |
 | `onnxruntime-web@1.31.0-dev.20260914-8d85527a0` | MIT |
 | `parse-cache-control@1.0.1` | BSD-3-Clause |
+| `pend@1.2.0` | MIT |
 | `platform@1.3.6` | MIT |
 | `progress@2.0.3` | MIT |
 | `protobufjs@7.6.6` | BSD-3-Clause |
@@ -126,3 +128,6 @@ Generated from the installed `package.json` files of every production dependency
 | `typedarray@0.0.6` | MIT |
 | `undici-types@7.24.6` | MIT |
 | `util-deprecate@1.0.2` | MIT |
+| `yauzl@3.4.0` | MIT |
+| `yazl@3.3.1` | MIT |
+| `zip-lib@1.4.0` | MIT |

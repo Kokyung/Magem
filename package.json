@@ -24,7 +24,8 @@
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
     "heic-decode": "^2.1.0",
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "zip-lib": "^1.4.0"
   },
   "optionalDependencies": {
     "ffmpeg-static": "^5.2.0"

@@ -56,6 +56,10 @@
     </select>
   </label>
   <div class="status" id="status"></div>
+  <button class="icon-btn index-toggle hidden" id="indexToggle" type="button">
+    <svg class="play" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+    <svg class="pause" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
+  </button>
 </div>
 <div class="progress hidden" id="progress"><div id="progressBar"></div></div>
 
@@ -128,10 +132,6 @@
     </div>
     <p class="muted small sub-note" data-i18n="excluded.note"></p>
     <ul class="folders" id="excludedList"></ul>
-    <div class="row">
-      <button class="ghost" id="reindex" data-i18n="drawer.reindex"></button>
-      <button class="ghost" id="stopIndex" data-i18n="drawer.stop"></button>
-    </div>
     <p class="muted small" id="statsLine"></p>
     <details id="errorsBox" class="hidden">
       <summary data-i18n="errors.title"></summary>
@@ -175,6 +175,14 @@
       </label>
       <p class="muted small setting-note" data-i18n="settings.backgroundNote"></p>
     </div>
+    <div class="setting">
+      <span data-i18n="backup.title"></span>
+      <div class="row">
+        <button class="ghost" id="backupBtn" type="button" data-i18n="backup.backup"></button>
+        <button class="ghost" id="restoreBtn" type="button" data-i18n="backup.restore"></button>
+      </div>
+      <p class="muted small backup-note" data-i18n="backup.note"></p>
+    </div>
   </div>
 </aside>
 <div class="scrim" id="scrim"></div>
@@ -201,6 +209,18 @@
 <div class="dropzone hidden" id="dropzone"><div data-i18n="dropzone"></div></div>
 <div class="toast hidden" id="toast"></div>
 <div class="context-menu hidden" id="contextMenu" role="menu"></div>
+<div class="modal hidden" id="jobModal" role="dialog" aria-modal="true" aria-labelledby="jobTitle">
+  <div class="modal-card">
+    <div class="spinner" id="jobSpinner" aria-hidden="true"></div>
+    <h3 id="jobTitle"></h3>
+    <p class="muted small" id="jobDetail"></p>
+    <div class="row modal-actions">
+      <button class="ghost hidden" id="jobReveal" type="button"></button>
+      <button class="ghost hidden" id="jobCancel" type="button" data-i18n="backup.cancel"></button>
+      <button class="primary hidden" id="jobClose" type="button" data-i18n="close"></button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>

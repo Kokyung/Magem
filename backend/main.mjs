@@ -24,6 +24,6 @@ server.listen(0, "127.0.0.1", () => {
     (device) => send({ type: "log", message: `ocr ready on ${device}` }),
     (e) => send({ type: "log", message: e.message }),
   ).finally(() => {
-    if (index.folders().length) index.start();
+    if (index.folders().length) index.startAuto();
   });
 });
