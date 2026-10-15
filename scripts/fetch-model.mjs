@@ -33,7 +33,7 @@ async function download(url, out, label) {
   if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`);
   await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(out + ".part"));
   fs.renameSync(out + ".part", out);
-  console.log("완료");
+  console.log("Complete");
 }
 
 async function main() {
@@ -42,7 +42,7 @@ async function main() {
   try {
     sizes = await remoteSizes();
   } catch (e) {
-    console.warn(`크기 정보를 가져오지 못했습니다(${e.message}). 이미 있는 파일은 건너뜁니다.`);
+    console.warn(`Can't get size data(${e.message}). File already exist will be passed.`);
   }
   for (const f of FILES) {
     const out = path.join(DEST, f);
@@ -50,10 +50,10 @@ async function main() {
     if (have >= 0 && (sizes[f] === undefined || have === sizes[f])) continue;
     await download(`https://huggingface.co/${REPO}/resolve/main/${f}`, out, `${f} (${((sizes[f] || 0) / 1e6).toFixed(0)} MB)`);
   }
-  console.log(`모델 준비 완료 → ${path.dirname(DEST)}`);
+  console.log(`Model is ready → ${path.dirname(DEST)}`);
 }
 
 main().catch((e) => {
-  console.error("모델 다운로드 실패:", e.message);
+  console.error("Model download failed:", e.message);
   process.exit(1);
 });

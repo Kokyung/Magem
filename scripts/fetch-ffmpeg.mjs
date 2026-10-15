@@ -21,12 +21,12 @@ const DEST = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "vend
 function unzipEntries(zip, wanted) {
   let eocd = zip.length - 22;
   while (eocd >= 0 && zip.readUInt32LE(eocd) !== 0x06054b50) eocd--;
-  if (eocd < 0) throw new Error("ZIP 형식이 아닙니다");
+  if (eocd < 0) throw new Error("Not a ZIP file");
   const count = zip.readUInt16LE(eocd + 10);
   let p = zip.readUInt32LE(eocd + 16);
   const out = {};
   for (let i = 0; i < count; i++) {
-    if (zip.readUInt32LE(p) !== 0x02014b50) throw new Error("ZIP 목록이 손상되었습니다");
+    if (zip.readUInt32LE(p) !== 0x02014b50) throw new Error("ZIP central directory is corrupt");
     const method = zip.readUInt16LE(p + 10), csize = zip.readUInt32LE(p + 20);
     const nameLen = zip.readUInt16LE(p + 28), extraLen = zip.readUInt16LE(p + 30), commentLen = zip.readUInt16LE(p + 32);
     const local = zip.readUInt32LE(p + 42);
@@ -37,11 +37,11 @@ function unzipEntries(zip, wanted) {
       const raw = zip.subarray(data, data + csize);
       if (method === 0) out[base] = raw;
       else if (method === 8) out[base] = zlib.inflateRawSync(raw);
-      else throw new Error(`지원하지 않는 압축 방식 (${method})`);
+      else throw new Error(`Unsupported compression method (${method})`);
     }
     p += 46 + nameLen + extraLen + commentLen;
   }
-  for (const w of wanted) if (!out[w]) throw new Error(`ZIP에 ${w}가 없습니다`);
+  for (const w of wanted) if (!out[w]) throw new Error(`${w} not found in ZIP`);
   return out;
 }
 
@@ -51,30 +51,30 @@ async function main() {
   const version = latest ? "ffmpeg-n8.1-latest-winarm64-lgpl-8.1" : NAME;
   const stamp = path.join(DEST, "VERSION");
   if (!latest && fs.existsSync(path.join(DEST, "ffmpeg.exe")) && fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8").trim() === NAME) {
-    console.log(`ffmpeg (Windows ARM64) 준비됨 → ${DEST}`);
+    console.log(`ffmpeg (Windows ARM64) already present → ${DEST}`);
     return;
   }
   process.stdout.write(`↓ ${url}… `);
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}${res.status === 404 && !latest
-      ? " — 고정된 BtbN 빌드가 삭제된 것 같습니다. 같은 파일의 사본 주소를 FFMPEG_WINARM64_URL로 지정하거나, --latest로 최신 LGPL 빌드를 받으세요."
+      ? " — the pinned BtbN build appears to have been removed. Set FFMPEG_WINARM64_URL to a mirror of the same file, or use --latest to fetch the latest LGPL build."
       : ""}`);
   }
   const zip = Buffer.from(await res.arrayBuffer());
   const hash = crypto.createHash("sha256").update(zip).digest("hex");
-  if (latest) console.log(`완료 (SHA-256 ${hash} — 고정되지 않은 최신 빌드)`);
-  else if (hash !== SHA256) throw new Error(`SHA-256 불일치 (${hash})`);
-  else console.log("완료");
+  if (latest) console.log(`done (SHA-256 ${hash} — unpinned latest build)`);
+  else if (hash !== SHA256) throw new Error(`SHA-256 mismatch (${hash})`);
+  else console.log("done");
   const files = unzipEntries(zip, ["bin/ffmpeg.exe", "LICENSE.txt"]);
   fs.mkdirSync(DEST, { recursive: true });
   fs.writeFileSync(path.join(DEST, "ffmpeg.exe"), files["bin/ffmpeg.exe"]);
   fs.writeFileSync(path.join(DEST, "LICENSE.txt"), files["LICENSE.txt"]);
   fs.writeFileSync(stamp, `${version}\n`);
-  console.log(`ffmpeg (Windows ARM64) 준비 완료 → ${DEST}`);
+  console.log(`ffmpeg (Windows ARM64) ready → ${DEST}`);
 }
 
 main().catch((e) => {
-  console.error("\nffmpeg 다운로드 실패:", e.message);
+  console.error("\nffmpeg download failed:", e.message);
   process.exit(1);
 });
