@@ -32,6 +32,7 @@ export const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".heic", ".heif", ".w
 export const VIDEO_EXT = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".wmv"]);
 export const EMBED_SIZE = 768;
 export const THUMB_SIZE = 360;
+export const TMP_SUFFIX = ".tmp"; // a thumbnail still being written
 
 sharp.cache(false);
 
@@ -130,11 +131,22 @@ async function decodeAndResize(src, thumbPath) {
     .removeAlpha().toColourspace("srgb").raw()
     .toBuffer({ resolveWithObject: true });
   if (thumbPath) {
-    await base.clone()
+    const jpg = await base.clone()
       .resize(THUMB_SIZE, THUMB_SIZE, { fit: "inside", withoutEnlargement: true })
       .flatten({ background: "#ffffff" })
       .jpeg({ quality: 80, mozjpeg: true })
-      .toFile(thumbPath);
+      .toBuffer();
+    // written aside and renamed: an interrupted write leaves no thumbnail rather than half of one
+    // (missing thumbnails are made again by the next indexing run)
+    // its own temporary name: overlapping indexed folders can have one file processed twice at once
+    const tmp = `${thumbPath}.${Math.random().toString(36).slice(2)}${TMP_SUFFIX}`;
+    try {
+      await fs.writeFile(tmp, jpg);
+      await fs.rename(tmp, thumbPath);
+    } catch (e) {
+      fs.rm(tmp, { force: true }).catch(() => {});
+      throw e;
+    }
   }
   return new RawImage(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height, 3);
 }

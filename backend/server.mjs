@@ -221,11 +221,6 @@ export function createServer({ index, staticDir, token, modelName }) {
         if (p === "/api/reindex") return json(res, { started: index.startAuto() }); // coming back to the window
         if (p === "/api/pause") { index.pause(); return json(res, { ok: true }); }
         if (p === "/api/resume") return json(res, { started: index.resume() });
-        if (p === "/api/unavailable") {
-          if (!Array.isArray(body.ids) || body.ids.length > 1000) return json(res, { error: "ids: send at most 1000 at a time" }, 400);
-          const ids = body.ids.map(Number).filter(Number.isInteger);
-          return json(res, { ids: index.unavailable(ids) });
-        }
         if (p === "/api/file") {
           const row = index.file(+body.id);
           return row ? json(res, row) : json(res, { error: "not found" }, 404);

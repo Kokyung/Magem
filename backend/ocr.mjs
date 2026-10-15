@@ -22,8 +22,6 @@ let rec = null;
 let chars = null;
 let queue = Promise.resolve();
 
-export let device = null;
-
 /** devices: tried in order (same list as the embedding model); each is checked with a test run */
 export async function init(dir, devices) {
   chars = ["", ...parseDict(fs.readFileSync(path.join(dir, "rec.yml"), "utf8")), " "];
@@ -35,7 +33,7 @@ export async function init(dir, devices) {
       const r = await ort.InferenceSession.create(path.join(dir, "rec.onnx"), opts);
       await d.run({ x: new ort.Tensor("float32", new Float32Array(3 * 64 * 64), [1, 3, 64, 64]) });
       await r.run({ x: new ort.Tensor("float32", new Float32Array(3 * REC_H * REC_MIN_W), [1, 3, REC_H, REC_MIN_W]) });
-      [det, rec, device] = [d, r, ep];
+      [det, rec] = [d, r];
       return ep;
     } catch (e) {
       errors.push(`${ep}: ${e.message}`);

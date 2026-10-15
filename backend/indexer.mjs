@@ -137,8 +137,6 @@ export class Index {
     this._pace = { ...PACE_GUESS, ...measured };
     this._paceMeasured = new Set(Object.keys(measured)); // the rest are still guesses
     this._left = { image: 0, video: 0 }; // files of this run still to index
-    this._thumbOps = 0;          // thumbnail writes/deletions in flight
-    this._thumbsPaused = null;   // a promise while a backup copies the thumbnails
     this._stop = false;
     this._running = null;
     this._matrix = null;
@@ -167,14 +165,8 @@ export class Index {
     return Object.fromEntries(this.db.prepare("SELECT key, value FROM prefs").all().map((r) => [r.key, JSON.parse(r.value)]));
   }
 
-  /** Thumbnail writes and deletions go through here, so a backup can hold them while it takes its copy. */
-  async _thumbOp(fn) {
-    while (this._thumbsPaused) await this._thumbsPaused;
-    this._thumbOps++;
-    try { return await fn(); } finally { this._thumbOps--; }
-  }
   _removeThumb(thumb) {
-    this._thumbOp(() => fs.promises.rm(this._thumbPath(thumb), { force: true })).catch(() => {});
+    fs.promises.rm(this._thumbPath(thumb), { force: true }).catch(() => {});
   }
 
   /** A thumbnail's file; only ever inside the thumbs folder, whatever the database says (e.g. a restored backup). */
@@ -183,27 +175,55 @@ export class Index {
   }
 
   /**
-   * A copy of the database and thumbnails, taken at one moment, for a backup (into backup-tmp/). Thumbnail
-   * writes wait meanwhile (database writes are already excluded: VACUUM INTO runs in one go), so the copy
-   * never holds a half-written thumbnail or misses one the database still points to.
+   * A copy of the database and thumbnails for a backup (into backup-tmp/). Indexing may go on meanwhile:
+   * thumbnails are only ever complete or absent (see media.mjs), and one the copy misses is made again by
+   * the first indexing run after a restore.
    */
   async snapshot() {
     const dir = path.join(this.dataDir, "backup-tmp");
-    let release;
-    this._thumbsPaused = new Promise((r) => { release = r; });
-    try {
-      while (this._thumbOps > 0) await new Promise((r) => setTimeout(r, 20));
-      fs.mkdirSync(dir, { recursive: true });
-      fs.rmSync(path.join(dir, "index.db"), { force: true });
-      fs.rmSync(path.join(dir, "thumbs"), { recursive: true, force: true });
-      this.db.exec(`VACUUM INTO '${path.join(dir, "index.db").replace(/'/g, "''")}'`);
+    const thumbs = path.join(dir, "thumbs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.rmSync(path.join(dir, "index.db"), { force: true });
+    fs.rmSync(thumbs, { recursive: true, force: true });
+    this.db.exec(`VACUUM INTO '${path.join(dir, "index.db").replace(/'/g, "''")}'`);
+    fs.mkdirSync(thumbs);
+    for (const name of fs.readdirSync(this.thumbDir)) {
+      if (name.endsWith(media.TMP_SUFFIX)) continue;
       // copy-on-write clones where the disk supports them (APFS), plain copies elsewhere
-      fs.cpSync(this.thumbDir, path.join(dir, "thumbs"), { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
-    } finally {
-      this._thumbsPaused = null;
-      release();
+      try { fs.copyFileSync(path.join(this.thumbDir, name), path.join(thumbs, name), fs.constants.COPYFILE_FICLONE); }
+      catch (e) { if (e.code !== "ENOENT") throw e; } // deleted since the listing
     }
     return dir;
+  }
+
+  /**
+   * Make again the thumbnails the index points to but that aren't on disk: a write cut short (the app was
+   * killed) or one a backup missed. Files about to be re-indexed (skipPaths) get new ones anyway.
+   * Thumbnails nothing points to (the app was killed before saving a file's entry, or a file was removed
+   * while its thumbnail was being made again) are deleted. Runs as a run starts, when no thumbnail is being written.
+   */
+  async _repairThumbs(skipPaths) {
+    const used = new Set(this.db.prepare(
+      "SELECT thumb FROM files WHERE thumb IS NOT NULL UNION SELECT thumb FROM vectors WHERE thumb IS NOT NULL",
+    ).all().map((r) => r.thumb));
+    const onDisk = new Set();
+    for (const name of await fs.promises.readdir(this.thumbDir)) {
+      // left by an interrupted write, or not part of the index
+      if (name.endsWith(media.TMP_SUFFIX) || !used.has(name)) this._removeThumb(name);
+      else onDisk.add(name);
+    }
+    // picture thumbnails only: file covers and the other kinds of entries reuse these
+    const missing = this.db.prepare(
+      `SELECT v.thumb, v.t, f.path, f.kind FROM vectors v JOIN files f ON f.id=v.file_id
+       WHERE f.status='done' AND v.modality IN ('image','frame') AND v.thumb IS NOT NULL`,
+    ).all().filter((r) => !onDisk.has(r.thumb) && !skipPaths.has(r.path));
+    for (const r of missing) {
+      if (this._stop) return;
+      const dest = this._thumbPath(r.thumb);
+      try {
+        await media.prepareImage(r.kind === "image" ? r.path : await media.videoFrame(r.path, r.t), dest);
+      } catch { /* unreadable now: the file shows without a picture until it is re-indexed */ }
+    }
   }
 
   pref(key) {
@@ -361,6 +381,7 @@ export class Index {
     Object.assign(pr, { running: true, phase: "scanning", total: 0, done: 0, errors: 0, current: "" });
     try {
       const todo = (await this._scan()).filter((it) => this._needsWork(it));
+      if (!this._stop) await this._repairThumbs(new Set(todo.map((it) => it.path)));
       // file names are quick to embed: cover the already-indexed files before the long media pass
       if (!this._stop) await this._enrichNames();
       Object.assign(pr, { phase: "scanning", total: 0, done: 0 });
@@ -474,7 +495,7 @@ export class Index {
 
   async _processImage(p) {
     const thumb = thumbName(p);
-    const img = await this._thumbOp(() => media.prepareImage(p, path.join(this.thumbDir, thumb)));
+    const img = await media.prepareImage(p, path.join(this.thumbDir, thumb));
     const [vec] = await embedder.embedImages([img]);
     return { duration: null, thumb, vecs: [{ modality: "image", t: null, tEnd: null, thumb, vec }] };
   }
@@ -497,7 +518,7 @@ export class Index {
           const jpg = await media.videoFrame(p, t);
           if (!jpg.length) continue;
           const thumb = thumbName(p, t.toFixed(2));
-          batch.push({ t, thumb, img: await this._thumbOp(() => media.prepareImage(jpg, path.join(this.thumbDir, thumb))) });
+          batch.push({ t, thumb, img: await media.prepareImage(jpg, path.join(this.thumbDir, thumb)) });
         } catch { /* unreadable frame: skip */ }
       }
       if (!batch.length) continue;
@@ -654,11 +675,6 @@ export class Index {
       norm: rows.map((r) => (r.text ? normText(r.text) : null)), // for keyword matching on names / OCR text
     };
     return this._matrix;
-  }
-
-  vector(vid) {
-    const r = this.db.prepare("SELECT vec FROM vectors WHERE id=?").get(vid);
-    return r ? blobVec(r.vec) : null;
   }
 
   /** A file's picture vector for "find similar", whichever section the result came from. */
@@ -842,30 +858,6 @@ export class Index {
         : { path: full, name, mtime, kind, indexed: false, failed: f?.status === "error" });
     }
     return { path: dir, root, dirs, files };
-  }
-
-
-  /**
-   * Of the given file ids (results on screen), which are no longer available? Deleted files are dropped
-   * from the index; files of a missing indexed folder (e.g. an unplugged drive) are only reported.
-   */
-  unavailable(ids) {
-    const get = this.db.prepare("SELECT path, folder FROM files WHERE id=?");
-    const out = [];
-    const deleted = [];
-    for (const id of ids) {
-      const f = get.get(id);
-      if (!f) out.push(id);
-      else if (isGone(f.path)) {
-        out.push(id);
-        if (fs.existsSync(f.folder)) deleted.push(id);
-      }
-    }
-    if (deleted.length) {
-      this._deleteFiles(deleted);
-      this._dirty = true;
-    }
-    return out;
   }
 
   file(id) {

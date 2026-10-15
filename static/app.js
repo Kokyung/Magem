@@ -89,17 +89,6 @@ function baseParams(limit, offset) {
 
 /** Re-run the whole search (append=false) or fetch the next page of one list. */
 async function runSearch(append = null) {
-  if (append) {
-    // a pending availability check may drop rows; page offsets must be read after it settles
-    await pruneRun;
-    const page = runSearchNow(append);
-    paging = page;
-    return page.finally(() => { if (paging === page) paging = null; });
-  }
-  return runSearchNow(append);
-}
-
-async function runSearchNow(append) {
   const seq = ++state.seq;
   const input = inputSeq;
   if (!append) state.expanded = false;
@@ -648,46 +637,13 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- results deleted outside the app ----------
-// Coming back to the window, ask the engine which results on screen are gone and drop just those,
-// keeping loaded pages, scroll position and an open viewer.
-const PRUNE_BATCH = 1000;
-let pruneRun = Promise.resolve();
-let paging = null; // in-flight "show more" request: checks wait for it so offsets stay consistent
-let pruning = false;
-
-function pruneUnavailable() {
-  if (pruning) return pruneRun;
-  pruning = true;
-  pruneRun = prune().finally(() => { pruning = false; });
-  return pruneRun;
-}
-
-async function prune() {
-  if (paging) await paging.catch(() => {});
-  const lists = Object.values(state.lists);
-  const ids = [...new Set(lists.flatMap((l) => l.results.map((r) => r.id)))];
-  if (!ids.length) return;
-  try {
-    const gone = new Set();
-    for (let i = 0; i < ids.length; i += PRUNE_BATCH) {
-      for (const id of (await post("/api/unavailable", { ids: ids.slice(i, i + PRUNE_BATCH) })).ids) gone.add(id);
-    }
-    if (!gone.size) return;
-    const viewing = viewerResult();
-    for (const l of lists) {
-      const removed = l.results.filter((r) => gone.has(r.id)).length;
-      l.results = l.results.filter((r) => !gone.has(r.id));
-      l.total -= removed;
-      l.offset -= removed;
-    }
-    if (viewing && gone.has(viewing.id)) closeViewer();
-    else if (viewing) state.viewer.index = state.viewer.list.results.indexOf(viewing);
-    render();
-  } catch {
-    // engine unreachable: the next search filters deleted files anyway
-  }
-}
-window.addEventListener("focus", () => { pruneUnavailable(); if (!isActive()) loadBrowse(); autoIndex(); });
+// Coming back to the window, list again: the engine drops files deleted meanwhile from what it returns.
+// Not while the user is paging or viewing (as with the refreshes during indexing); the next search covers that.
+window.addEventListener("focus", () => {
+  if (!isActive()) loadBrowse();
+  else if (!state.expanded && !state.viewer.list) runSearch();
+  autoIndex();
+});
 
 // Coming back to the window also picks up new and changed files, like a launch does: only when there are
 // indexed folders, nothing is running, and not more than every 30 s (switching apps back and forth).
@@ -698,7 +654,6 @@ function autoIndex() {
   lastAutoIndex = Date.now();
   post("/api/reindex").then(refreshStatus, () => {});
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) pruneUnavailable(); });
 
 // ---------- folder browser (start screen) ----------
 const BROWSE_PAGE = 200;
@@ -1156,6 +1111,7 @@ function applyLanguage(code) {
   $("jobReveal").textContent = $("vReveal").textContent;
   if (shownJob) renderIndexJob(shownJob);
   $("langSelect").value = lang;
+  syncDropdowns(); // the selected value and the option text just changed
   updateSortDir();
   updatePlaceholder();
   renderExamples();
@@ -1176,8 +1132,10 @@ for (const [code, name] of LANGUAGES) $("langSelect").add(new Option(name, code)
 // A styled <select>'s native pop-up drifts sideways on macOS (it lines its text up with the control's text, not
 // with the box), so each one gets a button and a list of our own. The <select> stays the source of truth: the
 // rest of the code keeps reading .value and listening for "change".
-const nativeSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
 let openDropdown = null; // { select, button, list }
+const dropdownSyncs = [];
+/** Show each select's current option on its button; call after setting a value or option text from code. */
+const syncDropdowns = () => dropdownSyncs.forEach((sync) => sync());
 function enhanceSelect(select) {
   const button = document.createElement("button");
   button.type = "button";
@@ -1187,13 +1145,7 @@ function enhanceSelect(select) {
   select.after(button);
   select.hidden = true;
   const sync = () => { button.textContent = select.selectedOptions[0]?.textContent || ""; };
-  // values set from code (saved settings) and option text changed by a language switch both show on the button
-  Object.defineProperty(select, "value", {
-    configurable: true,
-    get() { return nativeSelectValue.get.call(this); },
-    set(v) { nativeSelectValue.set.call(this, v); sync(); },
-  });
-  new MutationObserver(sync).observe(select, { childList: true, subtree: true, characterData: true });
+  dropdownSyncs.push(sync);
   select.addEventListener("change", sync);
   button.onclick = () => (openDropdown?.select === select ? closeDropdown() : showDropdown(select, button));
   button.onkeydown = (e) => {
@@ -1552,6 +1504,7 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   state.view = store.get("mmf.view", "image") === "text" ? "text" : "image";
   $("viewSelect").value = state.view;
   readBrowseSort();
+  syncDropdowns();
   browse.path = store.get("mmf.browse", null);
   recent = store.get(RECENT_KEY, []).filter((x) => typeof x === "string").slice(0, RECENT_MAX);
   refreshStatus();
