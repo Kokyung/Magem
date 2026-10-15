@@ -11,7 +11,7 @@
 
 <p align="center"><a href="README.md">한국어</a> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">简体中文</a> · <b>繁體中文</b></p>
 
-<p align="center"><img src="assets/mainscreen.png" alt="Magem 主畫面" width="900"></p>
+<p align="center"><img src="assets/mainscreen.zh-tw.png" alt="Magem 主畫面" width="900"></p>
 
 ## 特色
 
