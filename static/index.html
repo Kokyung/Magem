@@ -40,6 +40,7 @@
 </header>
 
 <div class="toolbar">
+  <div class="toolbar-filters">
   <div class="seg" id="typeFilter" role="tablist">
     <button data-type="all" class="on" data-i18n="filter.all"></button>
     <button data-type="image" data-i18n="filter.photos"></button>
@@ -56,11 +57,14 @@
       <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>
   </div>
-  <div class="status" id="status"></div>
-  <button class="icon-btn index-toggle hidden" id="indexToggle" type="button">
-    <svg class="play" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
-    <svg class="pause" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
-  </button>
+  </div>
+  <div class="status-group">
+    <div class="status" id="status"></div>
+    <button class="icon-btn index-toggle hidden" id="indexToggle" type="button">
+      <svg class="play" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+      <svg class="pause" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
+    </button>
+  </div>
 </div>
 <div class="progress hidden" id="progress"><div id="progressBar"></div></div>
 

@@ -210,7 +210,7 @@ function rangeLabel() {
   const day = (ms) => new Intl.DateTimeFormat(lang, { dateStyle: "medium" }).format(new Date(ms));
   return `${state.after != null ? day(state.after) : ""} ~ ${state.before != null ? day(state.before - 1) : ""}`.trim();
 }
-const withRange = (label) => (hasDates() ? `${label} · ${rangeLabel()}` : label);
+const withRange = (label) => (hasDates() ? `${label} / ${rangeLabel()}` : label);
 
 /** A headed block of results (heading key: sec.<name>.title). */
 function resultSection(key, list, heading) {
@@ -294,6 +294,28 @@ function skeletonGrid(n) {
   }
   return grid;
 }
+
+// The toolbar's filters take, on the first row, only what fits beside the status (at least STATUS_MIN wide);
+// the rest of them wrap below, and the status text gets all the room left on that row.
+const STATUS_MIN = 140;
+function fitToolbar() {
+  const bar = document.querySelector(".toolbar");
+  const filters = document.querySelector(".toolbar-filters");
+  const cs = getComputedStyle(bar);
+  const room = bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - parseFloat(cs.columnGap) - STATUS_MIN;
+  const gap = parseFloat(getComputedStyle(filters).columnGap) || 0;
+  const widths = [...filters.children].filter((el) => el.offsetParent !== null).map((el) => el.getBoundingClientRect().width);
+  let row = 0;
+  for (const w of widths) {
+    const next = row ? row + gap + w : w;
+    if (row && next > room) break;
+    row = next;
+  }
+  filters.style.flexBasis = `${Math.ceil(Math.max(row, ...widths, 0))}px`;
+}
+const toolbarWatch = new ResizeObserver(() => fitToolbar());
+toolbarWatch.observe(document.querySelector(".toolbar"));
+for (const el of document.querySelector(".toolbar-filters").children) toolbarWatch.observe(el); // e.g. a language change
 
 // the results bar (count, select-all) sticks under the header, whose height changes when it wraps
 new ResizeObserver(([entry]) => {
@@ -774,7 +796,7 @@ function renderBrowse() {
   $("browseNote").textContent = !d.path ? ""
     : !d.files.length && !d.dirs.length ? t("browser.empty")
     : d.files.length ? [t("count.photos", { n: num(imgs) }), t("count.videos", { n: num(indexed.length - imgs) }),
-      pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) })].filter(Boolean).join(" · ") : "";
+      pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) })].filter(Boolean).join(" / ") : "";
 }
 
 // ---------- recent searches ----------
@@ -1415,7 +1437,7 @@ function renderStatus(s) {
   toggle.setAttribute("aria-label", t(p.running ? "index.pause" : "index.start"));
   const counts = t("status.counts", { photos: num(stats.images), videos: num(stats.videos) });
   const eng = s.engine;
-  const engLabel = eng.status === "ready" ? `${s.model} · ${eng.device in DEVICE_KEYS ? t(DEVICE_KEYS[eng.device]) : eng.device}`
+  const engLabel = eng.status === "ready" ? `${s.model} / ${eng.device in DEVICE_KEYS ? t(DEVICE_KEYS[eng.device]) : eng.device}`
     : eng.status === "error" ? "Model error" : t("engine.loading", { model: s.model });
   $("status").title = eng.status === "error" ? eng.error || "" : "";
   if (p.running) {
@@ -1431,13 +1453,13 @@ function renderStatus(s) {
     if (eta) parts.splice(1, 0, { bold: eta });
     $("status").replaceChildren(...parts.flatMap((part, i) => {
       const node = typeof part === "string" ? part : Object.assign(document.createElement("b"), { textContent: part.bold });
-      return i ? [" · ", node] : [node];
+      return i ? [" / ", node] : [node];
     }));
     $("progress").classList.remove("hidden");
     $("progressBar").style.width = `${pct}%`;
   } else {
     const done = s.paused ? t("status.paused") : s.lastRun ? t("status.indexedAt", { time: fmtWhen(s.lastRun.finishedAt) }) : "";
-    $("status").textContent = [counts, done, engLabel].filter(Boolean).join(" · ");
+    $("status").textContent = [counts, done, engLabel].filter(Boolean).join(" / ");
     $("progress").classList.add("hidden");
   }
 
