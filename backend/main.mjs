@@ -2,7 +2,6 @@
 import path from "node:path";
 import * as embedder from "./embedder.mjs";
 import { Index } from "./indexer.mjs";
-import * as ocr from "./ocr.mjs";
 import { createServer } from "./server.mjs";
 
 const { MMF_DATA, MMF_MODELS, MMF_STATIC, MMF_TOKEN } = process.env;
@@ -19,11 +18,5 @@ server.listen(0, "127.0.0.1", () => {
     () => send({ type: "log", message: `model ready on ${embedder.engine.device}` }),
     (e) => send({ type: "log", message: e.message }),
   );
-  // OCR is optional: if it can't load, everything else still works
-  ocr.init(path.join(MMF_MODELS, "ocr"), embedder.candidateDevices()).then(
-    (device) => send({ type: "log", message: `ocr ready on ${device}` }),
-    (e) => send({ type: "log", message: e.message }),
-  ).finally(() => {
-    if (index.folders().length) index.start();
-  });
+  if (index.folders().length) index.startAuto();
 });

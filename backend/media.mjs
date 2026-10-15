@@ -1,6 +1,7 @@
 // Decoding and resizing of photos, video frames and audio — all via bundled binaries (sharp, ffmpeg),
 // so nothing depends on tools installed on the user's machine.
 import { spawn } from "node:child_process";
+import exifr from "exifr";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -32,6 +33,7 @@ export const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".heic", ".heif", ".w
 export const VIDEO_EXT = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".wmv"]);
 export const EMBED_SIZE = 768;
 export const THUMB_SIZE = 360;
+export const TMP_SUFFIX = ".tmp"; // a thumbnail still being written
 
 sharp.cache(false);
 
@@ -86,14 +88,11 @@ export function prepareImage(input, thumbPath) {
   return withFallback(input, (src) => decodeAndResize(src, thumbPath));
 }
 
-/** Upright RGB pixels no larger than maxSide (for OCR). */
-export function loadRaw(input, maxSide) {
-  return withFallback(input, async (src) => {
-    const { data, info } = await sharp(src, { failOn: "none", animated: false }).rotate()
-      .resize(maxSide, maxSide, { fit: "inside", withoutEnlargement: true })
-      .removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
-    return { data, width: info.width, height: info.height };
-  });
+/** The whole picture, upright and with its transparency, as a PNG for the clipboard (long edge capped). */
+export function clipboardPng(input, maxSide = 8192) {
+  return withFallback(input, (src) => sharp(src, { failOn: "none", animated: false }).rotate()
+    .resize(maxSide, maxSide, { fit: "inside", withoutEnlargement: true })
+    .png({ compressionLevel: 1 }).toBuffer());
 }
 
 async function withFallback(input, fn) {
@@ -123,13 +122,47 @@ async function decodeAndResize(src, thumbPath) {
     .removeAlpha().toColourspace("srgb").raw()
     .toBuffer({ resolveWithObject: true });
   if (thumbPath) {
-    await base.clone()
+    const jpg = await base.clone()
       .resize(THUMB_SIZE, THUMB_SIZE, { fit: "inside", withoutEnlargement: true })
       .flatten({ background: "#ffffff" })
       .jpeg({ quality: 80, mozjpeg: true })
-      .toFile(thumbPath);
+      .toBuffer();
+    // written aside and renamed: an interrupted write leaves no thumbnail rather than half of one
+    // (missing thumbnails are made again by the next indexing run)
+    // its own temporary name: overlapping indexed folders can have one file processed twice at once
+    const tmp = `${thumbPath}.${Math.random().toString(36).slice(2)}${TMP_SUFFIX}`;
+    try {
+      await fs.writeFile(tmp, jpg);
+      await fs.rename(tmp, thumbPath);
+    } catch (e) {
+      fs.rm(tmp, { force: true }).catch(() => {});
+      throw e;
+    }
   }
   return new RawImage(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height, 3);
+}
+
+/**
+ * When a photo or video was taken (ms since 1970), or null if the file doesn't say. Photos: EXIF
+ * DateTimeOriginal (else CreateDate), read as local time like the camera's clock; videos: the creation_time
+ * the camera or phone wrote into the container (UTC). Implausible values (before 1990, in the future) are ignored.
+ * Throws if the file can't be read at all (e.g. its drive is unplugged): that is "unknown for now", not "no date".
+ */
+export async function captureTime(file, kind) {
+  await fs.access(file);
+  let t = null;
+  try {
+    if (kind === "image") {
+      const tags = await exifr.parse(file, { pick: ["DateTimeOriginal", "CreateDate"] });
+      const d = tags?.DateTimeOriginal || tags?.CreateDate;
+      if (d instanceof Date) t = d.getTime();
+    } else {
+      const r = await run(ffmpegBinary(), ["-hide_banner", "-nostdin", "-i", file], { timeout: 60000 });
+      const m = /creation_time\s*:\s*(\S+)/.exec(r.stderr);
+      if (m) t = Date.parse(m[1]);
+    }
+  } catch { /* unreadable or no metadata */ }
+  return Number.isFinite(t) && t >= Date.UTC(1990, 0, 1) && t <= Date.now() + 86400000 ? t : null;
 }
 
 /** Duration (s) and whether the file has an audio stream. */

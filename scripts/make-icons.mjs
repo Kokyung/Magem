@@ -29,17 +29,25 @@ console.log(`rounded square: x=${left}..${right} y=${top}..${bottom} radius≈${
 const maskAlpha = (inset) => sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">
   <rect x="${left + inset}" y="${top + inset}" width="${right - left - 2 * inset}" height="${bottom - top - 2 * inset}"
     rx="${Math.max(0, radius - inset)}" fill="#fff"/></svg>`)).extractChannel(3).raw().toBuffer();
-/** The source pixels with the given alpha channel (built by hand: plain and predictable). */
-function withAlpha(alpha) {
-  const rgba = Buffer.alloc(W * H * 4);
-  for (let i = 0; i < W * H; i++) {
-    rgba[i * 4] = data[i * 3]; rgba[i * 4 + 1] = data[i * 3 + 1]; rgba[i * 4 + 2] = data[i * 3 + 2];
-    rgba[i * 4 + 3] = alpha[i];
+// The square's anti-aliased rim is navy blended with the white canvas, and its corners aren't exact circles,
+// so a geometric cut alone leaves a light hairline on dark backgrounds. In a thin band along the edge, alpha
+// comes from how white each pixel is, and the white is taken back out of its colour.
+const RIM_BG = 255;                                  // the canvas
+const RIM_BODY = (15 + 22 + 60) / 3;                 // the navy body next to the rim (average channel)
+const inner = await maskAlpha(4);                    // fully inside: kept as is
+const outer = await maskAlpha(-2);                   // a little beyond the measured edge, so no rim pixel is missed
+const rgba = Buffer.alloc(W * H * 4);
+for (let i = 0; i < W * H; i++) {
+  let [r, g, b] = [data[i * 3], data[i * 3 + 1], data[i * 3 + 2]];
+  let a = 1;
+  if (inner[i] < 255) {
+    const whiteness = Math.min(1, Math.max(0, ((r + g + b) / 3 - RIM_BODY) / (RIM_BG - RIM_BODY)));
+    a = Math.min(outer[i] / 255, 1 - whiteness);
+    if (a > 0) [r, g, b] = [r, g, b].map((c) => Math.max(0, Math.min(255, Math.round((c - (1 - a) * RIM_BG) / a))));
   }
-  return rgba;
+  rgba.set([r, g, b, Math.round(a * 255)], i * 4);
 }
-// half a pixel in, so no white fringe survives at the corners
-const masked = await sharp(withAlpha(await maskAlpha(0.5)), { raw: { width: W, height: H, channels: 4 } }).png().toBuffer();
+const masked = await sharp(rgba, { raw: { width: W, height: H, channels: 4 } }).png().toBuffer();
 const body = await sharp(masked).extract({ left, top, width: size, height: bottom - top + 1 }).png().toBuffer();
 const square = (px) => sharp(body).resize(px, px, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } }).png();
 

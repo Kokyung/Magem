@@ -1,7 +1,7 @@
 {
   "name": "magem",
   "productName": "Magem",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "EmbeddingGemma 2로 사진·동영상을 말로 찾는 로컬 검색 앱",
   "author": "Kokyung Byun",
   "license": "Apache-2.0",
@@ -23,8 +23,10 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
+    "exifr": "^7.1.3",
     "heic-decode": "^2.1.0",
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "zip-lib": "^1.4.0"
   },
   "optionalDependencies": {
     "ffmpeg-static": "^5.2.0"
@@ -34,7 +36,7 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "app.mymemoryfinder",
+    "appId": "app.kokyung.magem",
     "productName": "Magem",
     "directories": {
       "output": "dist",
@@ -60,10 +62,6 @@
       {
         "from": "models/embeddinggemma-2-ONNX",
         "to": "models/embeddinggemma-2-ONNX"
-      },
-      {
-        "from": "models/ocr",
-        "to": "models/ocr"
       },
       {
         "from": "LICENSE",
@@ -93,6 +91,7 @@
       "icon": "build/icon.png"
     },
     "nsis": {
+      "guid": "adffc7f2-4e0f-5696-a2c9-6799ffc43d8d",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },

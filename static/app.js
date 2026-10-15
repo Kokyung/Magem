@@ -1,10 +1,9 @@
 const $ = (id) => document.getElementById(id);
 document.documentElement.classList.add(`platform-${window.mmf?.platform || "web"}`);
 const PAGE = 60;          // image-relevance list page
-const SECTION_PAGE = 12;  // first page of each text-relevance section (two rows)
-const SECTION_MORE = 24;
-const SECTIONS = ["name", "ocr", "audio"];
-const VIA_KEY = { image: "via.scene", frame: "via.scene", audio: "via.audio", name: "via.name", ocr: "via.ocr" };
+const NAME_PAGE = 12;     // first page of the file & folder names list above the results (two rows)
+const NAME_MORE = 24;
+const VIA_KEY = { image: "via.scene", frame: "via.scene", audio: "via.audio", name: "via.name" };
 
 // ---------- language ----------
 // UI text comes from i18n.js; error messages from the engine and the toasts below stay in English.
@@ -30,11 +29,13 @@ const store = {
 const newList = () => ({ results: [], total: 0, offset: 0 });
 const state = {
   type: "all", audio: true, query: "", imageBlob: null, similarVid: null, similarExclude: null,
-  view: store.get("mmf.view", "image") === "text" ? "text" : "image",
-  lists: {},            // "main" for image relevance; name / ocr / audio for text relevance
+  lists: {},            // "main"; a text search also has "name" (file & folder names, shown above it)
   expanded: false,      // user paged a list: don't auto-refresh under them
   seq: 0, hasIndex: false, progress: null,
   viewer: { list: null, index: -1 },
+  searching: 0,         // seq of an image search still waiting for its first page (shows placeholders)
+  after: null, before: null, // capture-date range (ms), from the date filter
+  loadedInput: -1,      // the search input the results on screen belong to
 };
 
 // ---------- api ----------
@@ -60,6 +61,12 @@ const fmtTime = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(s % 60).padStart(2, "0");
   return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
 };
+/** A moment in the UI language: just the time if it was today, otherwise date and time. */
+function fmtWhen(ms) {
+  const d = new Date(ms);
+  const today = new Date().toDateString() === d.toDateString();
+  return new Intl.DateTimeFormat(lang, today ? { timeStyle: "short" } : { dateStyle: "medium", timeStyle: "short" }).format(d);
+}
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 /** Escape text and mark the query's words in it. */
@@ -73,27 +80,29 @@ function highlight(text, query) {
 
 // ---------- search ----------
 const isTextQuery = () => !!state.query && !state.imageBlob && state.similarVid == null;
-const isActive = () => !!(state.query || state.imageBlob || state.similarVid != null);
+const hasDates = () => state.after != null || state.before != null;
+// a date range alone also shows results: the files taken in it, newest first
+const isActive = () => !!(state.query || state.imageBlob || state.similarVid != null || hasDates());
 
 function baseParams(limit, offset) {
-  return new URLSearchParams({ type: state.type, audio: state.audio ? "1" : "0", limit, offset });
+  const p = new URLSearchParams({ type: state.type, audio: state.audio ? "1" : "0", limit, offset });
+  if (state.after != null) p.set("after", state.after);
+  if (state.before != null) p.set("before", state.before);
+  return p;
 }
 
 /** Re-run the whole search (append=false) or fetch the next page of one list. */
 async function runSearch(append = null) {
-  if (append) {
-    // a pending availability check may drop rows; page offsets must be read after it settles
-    await pruneRun;
-    const page = runSearchNow(append);
-    paging = page;
-    return page.finally(() => { if (paging === page) paging = null; });
-  }
-  return runSearchNow(append);
-}
-
-async function runSearchNow(append) {
   const seq = ++state.seq;
+  const input = inputSeq;
   if (!append) state.expanded = false;
+  // a new image search waits on the image model: placeholders instead of the previous results
+  // (not for the automatic refreshes while indexing, which keep the same input)
+  if (!append && (state.imageBlob || state.similarVid != null) && state.loadedInput !== input) {
+    state.lists = {};
+    state.searching = seq;
+    render();
+  }
   try {
     if (state.imageBlob) {
       await loadMain(seq, append, (p) => {
@@ -107,20 +116,22 @@ async function runSearchNow(append) {
         if (state.similarExclude != null) p.set("exclude", state.similarExclude);
         return api(`/api/similar?${p}`);
       });
-    } else if (state.query && state.view === "image") {
-      await loadMain(seq, append, (p) => {
-        p.set("q", state.query);
-        p.set("view", "image");
-        return api(`/api/search?${p}`);
-      });
     } else if (state.query) {
-      await loadSections(seq, append);
+      await loadText(seq, append);
+    } else if (hasDates()) {
+      await loadMain(seq, append, (p) => api(`/api/by_date?${p}`));
     } else {
       state.lists = {};
       render();
     }
+    if (seq === state.seq) state.loadedInput = input;
   } catch (e) {
     if (seq === state.seq) toast(`Search failed: ${e.message}`);
+  } finally {
+    if (state.searching === seq) {
+      state.searching = 0;
+      if (!state.lists.main) render(); // failed: drop the placeholders
+    }
   }
 }
 
@@ -140,15 +151,16 @@ async function loadMain(seq, append, fetchPage) {
   render();
 }
 
-async function loadSections(seq, appendKey) {
-  const p = baseParams(appendKey ? SECTION_MORE : SECTION_PAGE, appendKey ? state.lists[appendKey].offset : 0);
+/** A text search: files whose name matches, then everything else (in one request); appendKey pages one of them. */
+async function loadText(seq, appendKey) {
+  const p = baseParams(appendKey === "name" ? NAME_MORE : PAGE, appendKey ? state.lists[appendKey].offset : 0);
   p.set("q", state.query);
-  p.set("view", "text");
   if (appendKey) p.set("section", appendKey);
-  const { sections } = await api(`/api/search?${p}`);
+  else p.set("nameLimit", NAME_PAGE);
+  const lists = await api(`/api/search?${p}`);
   if (seq !== state.seq) return;
   if (!appendKey) state.lists = {};
-  for (const [key, data] of Object.entries(sections)) {
+  for (const [key, data] of Object.entries(lists)) {
     const list = appendKey ? state.lists[key] : newList();
     list.results = list.results.concat(data.results);
     list.total = data.total;
@@ -160,62 +172,53 @@ async function loadSections(seq, appendKey) {
 
 function render() {
   const active = isActive();
+  updateSelectAll();
   updateHome();
-  $("viewMode").classList.toggle("hidden", !isTextQuery());
   const box = $("results");
   box.innerHTML = "";
   if (!active) { $("summary").textContent = ""; return; }
-
-  if (state.lists.main) {
-    const list = state.lists.main;
-    const byImage = state.imageBlob ? t("summary.byImage") : state.similarVid != null ? t("summary.similar") : null;
-    const label = byImage ? (state.query ? t("summary.imagePlus", { q: state.query }) : byImage) : t("summary.byImageView", { q: state.query });
-    $("summary").textContent = list.total ? t("summary.count", { label, n: num(list.total) }) : t("summary.none", { label });
-    box.appendChild(listBlock("main", list));
+  hideBoot();
+  syncSelection(`results ${inputSeq} ${state.type} ${state.audio} ${state.after} ${state.before}`); // the filters change what is shown
+  keepSelected(Object.values(state.lists).flatMap((l) => l.results));
+  if (state.searching === state.seq && !state.lists.main) { // only the latest search: a superseded one doesn't count
+    $("summary").innerHTML = `<span class="sk sk-line"></span>`;
+    box.appendChild(skeletonGrid(12));
     return;
   }
-  const keys = SECTIONS.filter((k) => state.lists[k]);
-  const total = keys.reduce((n, k) => n + state.lists[k].total, 0);
-  $("summary").textContent = t("summary.count", { label: t("summary.byTextView", { q: state.query }), n: num(total) });
-  for (const key of keys) {
-    const list = state.lists[key];
-    const sec = document.createElement("section");
-    sec.className = "result-section";
-    sec.innerHTML = `<header><h2>${esc(t(`sec.${key}.title`))}<span class="count">${num(list.total)}</span></h2>
-      <p class="muted small">${esc(t(`sec.${key}.desc`))}</p></header>`;
-    if (key === "ocr") {
-      const note = document.createElement("p");
-      note.id = "ocrPendingNote";
-      note.className = "pending-note small hidden";
-      sec.appendChild(note);
-      updateOcrPendingNote(note);
-    }
-    if (list.total) {
-      sec.appendChild(listBlock(key, list));
-    } else {
-      const note = document.createElement("p");
-      note.className = "muted small empty-note";
-      const p = state.progress;
-      note.textContent = key === "name" && p?.running && p.phase === "names"
-          ? t("sec.analyzingNames")
-          : t("sec.empty");
-      sec.appendChild(note);
-    }
-    box.appendChild(sec);
+
+  const { name, main } = state.lists;
+  if (isTextQuery()) {
+    // files whose name or folder matches first, then everything else, each under its heading
+    const label = withRange(t("summary.query", { q: state.query }));
+    const total = (name?.total || 0) + (main?.total || 0);
+    $("summary").textContent = total ? t("summary.count", { label, n: num(total) }) : t("summary.none", { label });
+    if (name?.total) box.appendChild(resultSection("name", name, "name"));
+    if (main?.total) box.appendChild(resultSection("main", main, "scene"));
+    return;
+  }
+  if (main) {
+    const byImage = state.imageBlob || state.similarVid != null;
+    const label = state.imageBlob ? t("summary.byImage") : t("summary.similar");
+    const shown = !byImage ? rangeLabel() : withRange(state.query ? t("summary.imagePlus", { q: state.query }) : label);
+    $("summary").textContent = main.total ? t("summary.count", { label: shown, n: num(main.total) }) : t("summary.none", { label: shown });
+    box.appendChild(listBlock("main", main));
   }
 }
 
-/** "Text in photos" can grow while text recognition is still working through files. */
-function updateOcrPendingNote(note = $("ocrPendingNote")) {
-  if (!note) return;
-  const o = state.ocr;
-  const left = o && o.available ? o.pendingImages + o.pendingVideos : 0;
-  note.classList.toggle("hidden", !left);
-  if (!left) return;
-  const parts = [o.pendingImages && t("count.photos", { n: num(o.pendingImages) }), o.pendingVideos && t("count.videos", { n: num(o.pendingVideos) })].filter(Boolean);
-  const p = state.progress;
-  note.textContent = `${t("ocr.pending", { parts: parts.join(" · ") })} `
-    + t(!p?.running ? "ocr.stopped" : p.ocr?.running ? "ocr.running" : "ocr.afterIndex");
+/** The chosen capture-date range, as shown in the summary ("Jul 1, 2025 ~ Aug 31, 2025", "~ Aug 31, 2025"). */
+function rangeLabel() {
+  const day = (ms) => new Intl.DateTimeFormat(lang, { dateStyle: "medium" }).format(new Date(ms));
+  return `${state.after != null ? day(state.after) : ""} ~ ${state.before != null ? day(state.before - 1) : ""}`.trim();
+}
+const withRange = (label) => (hasDates() ? `${label} / ${rangeLabel()}` : label);
+
+/** A headed block of results (heading key: sec.<name>.title). */
+function resultSection(key, list, heading) {
+  const sec = document.createElement("section");
+  sec.className = "result-section";
+  sec.innerHTML = `<header><h2>${esc(t(`sec.${heading}.title`))}<span class="count">${num(list.total)}</span></h2></header>`;
+  sec.appendChild(listBlock(key, list));
+  return sec;
 }
 
 /** Grid of tiles plus its "show more" button. */
@@ -244,17 +247,272 @@ function tile(r, list, i) {
   b.title = r.path;
   let badges = "";
   if (r.kind === "video") {
-    const icon = r.via === "audio" ? "🔊" : r.via === "ocr" ? "T" : "▶";
+    const icon = r.via === "audio" ? "🔊" : "▶";
     if (r.t != null) badges += `<span class="badge tl">${icon} ${fmtTime(r.t)}</span>`;
     if (r.duration) badges += `<span class="badge tr">${fmtTime(r.duration)}</span>`;
   }
-  // name/OCR hits show the matched text on the tile; others show the file name on hover
+  // name hits show the matched text on the tile; others show the file name on hover
   const caption = r.text
     ? `<span class="caption"><span>${highlight(r.text.replace(/\s*\n\s*/g, " · "), state.query)}</span></span>`
     : `<span class="name">${esc(r.name)}</span>`;
-  b.innerHTML = `<img loading="lazy" src="/thumb/${r.thumb}" alt="">${badges}${caption}`;
-  b.onclick = () => { commitRecent(); openViewer(list, i); };
+  b.dataset.id = r.id;
+  b.innerHTML = `<img loading="lazy" src="/thumb/${esc(r.thumb)}" alt="">${badges}${caption}`
+    + `<span class="check" role="checkbox" aria-label="${esc(t("select"))}"></span>`;
+  b.classList.toggle("selected", selection.ids.has(r.id));
+  b.querySelector(".check").setAttribute("aria-checked", selection.ids.has(r.id));
+  const check = b.querySelector(".check");
+  check.onmousedown = (e) => beginDragSelect(e, b); // toggles this tile; dragging extends to the tiles passed over
+  check.onclick = (e) => e.stopPropagation();
+  b.onclick = () => {
+    if (suppressTileClick) return; // the end of a checkbox sweep, not a click on the picture
+    commitRecent();
+    openViewer(list, i);
+  };
+  // dragged onto the search box: search with this file's vector instead of downloading its thumbnail
+  // dragged out: the main process starts a native drag carrying the files themselves (to Finder, File Explorer,
+  // mail, a web page…); a selected tile takes the whole selection along
+  b.ondragstart = (e) => {
+    e.preventDefault();
+    const ids = selection.ids.has(r.id) && selection.ids.size > 1 ? [...selection.ids] : [r.id];
+    if (ids.length > MAX_COPY) return toast(t("toast.tooMany", { max: num(MAX_COPY), n: num(ids.length) }), 4000);
+    outgoingDrag = { r };
+    window.mmf.startFileDrag(ids, r.thumb);
+  };
+  b.oncontextmenu = (e) => { e.preventDefault(); fileMenu(e, r); };
   return b;
+}
+
+/** Grey tiles that stand in for results that are still loading. */
+function skeletonGrid(n) {
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  grid.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < n; i++) {
+    const el = document.createElement("div");
+    el.className = "tile sk";
+    grid.appendChild(el);
+  }
+  return grid;
+}
+
+// The toolbar's filters take, on the first row, only what fits beside the status (at least STATUS_MIN wide);
+// the rest of them wrap below, and the status text gets all the room left on that row.
+const STATUS_MIN = 140;
+function fitToolbar() {
+  const bar = document.querySelector(".toolbar");
+  const filters = document.querySelector(".toolbar-filters");
+  const cs = getComputedStyle(bar);
+  const room = bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - parseFloat(cs.columnGap) - STATUS_MIN;
+  const gap = parseFloat(getComputedStyle(filters).columnGap) || 0;
+  const widths = [...filters.children].filter((el) => el.offsetParent !== null).map((el) => el.getBoundingClientRect().width);
+  let row = 0;
+  for (const w of widths) {
+    const next = row ? row + gap + w : w;
+    if (row && next > room) break;
+    row = next;
+  }
+  filters.style.flexBasis = `${Math.ceil(Math.max(row, ...widths, 0))}px`;
+}
+const toolbarWatch = new ResizeObserver(() => fitToolbar());
+toolbarWatch.observe(document.querySelector(".toolbar"));
+for (const el of document.querySelector(".toolbar-filters").children) toolbarWatch.observe(el); // e.g. a language change
+
+// the results bar (count, select-all) sticks under the header, whose height changes when it wraps
+new ResizeObserver(([entry]) => {
+  document.documentElement.style.setProperty("--top-height", `${entry.target.offsetHeight}px`);
+}).observe(document.querySelector(".top"));
+
+// the start screen's placeholders, until the first status and folder listing arrive
+$("bootGrid").appendChild(skeletonGrid(14));
+let booting = true;
+function hideBoot() {
+  if (!booting) return;
+  booting = false;
+  $("bootSkeleton").remove();
+}
+
+// ---------- selection & context menus ----------
+// Selection belongs to what is on screen (one search, or one folder): it is cleared when that changes.
+const selection = { ids: new Set(), key: "" };
+function syncSelection(key) {
+  if (selection.key === key) return;
+  selection.key = key;
+  clearSelection();
+}
+/** Drop selected files that are no longer listed (e.g. deleted outside the app), so they can't be copied blind. */
+function keepSelected(items) {
+  if (!selection.ids.size) return;
+  const listed = new Set(items.map((r) => r.id));
+  let changed = false;
+  for (const id of selection.ids) if (!listed.has(id)) { selection.ids.delete(id); changed = true; }
+  if (changed) updateSelection();
+}
+function toggleSelected(id) {
+  if (!selection.ids.delete(id)) selection.ids.add(id);
+  updateSelection();
+}
+function clearSelection() {
+  if (!selection.ids.size) return;
+  selection.ids.clear();
+  updateSelection();
+}
+
+/** Files the select-all toggle covers: what is loaded on screen, up to each "show more" button. */
+function selectableOnScreen() {
+  if (isActive()) return Object.values(state.lists).flatMap((l) => l.results);
+  return browse.data ? browse.data.files.slice(0, browse.shown).filter((f) => f.indexed) : [];
+}
+function updateSelectAll() {
+  const items = selectableOnScreen();
+  // anything selected → clicking clears it; nothing selected → it selects everything on screen
+  const all = items.length > 0 && items.every((r) => selection.ids.has(r.id));
+  const checked = all ? "true" : selection.ids.size ? "mixed" : "false";
+  const active = isActive();
+  for (const [id, shown] of [["resultsSelectAll", active], ["browseSelectAll", !active]]) {
+    $(id).setAttribute("aria-checked", checked);
+    $(id).classList.toggle("hidden", !shown || !items.length);
+  }
+}
+function toggleSelectAll() {
+  if (selection.ids.size) selection.ids.clear();
+  else for (const r of selectableOnScreen()) selection.ids.add(r.id);
+  updateSelection();
+}
+$("resultsSelectAll").onclick = toggleSelectAll;
+$("browseSelectAll").onclick = toggleSelectAll;
+
+function updateSelection() {
+  updateSelectAll();
+  document.body.classList.toggle("selecting", selection.ids.size > 0);
+  for (const el of document.querySelectorAll(".tile[data-id]")) {
+    const on = selection.ids.has(+el.dataset.id);
+    el.classList.toggle("selected", on);
+    el.querySelector(".check")?.setAttribute("aria-checked", on);
+  }
+}
+
+// ---------- drag-select: press a tile's checkbox and sweep over other tiles ----------
+// Like photo apps, the sweep covers every tile between the first and the current one in reading order
+// (within that grid). It adds when the first tile was unselected, and removes when it was selected.
+let dragSel = null;
+let suppressTileClick = false;
+function beginDragSelect(e, tileEl) {
+  if (e.button !== 0) return;
+  e.preventDefault(); // no native image drag or text selection
+  e.stopPropagation();
+  // ids, not elements: indexing refreshes may redraw the grid in the middle of a sweep
+  const ids = [...tileEl.parentElement.querySelectorAll(".tile[data-id]")].map((el) => +el.dataset.id);
+  const anchor = ids.indexOf(+tileEl.dataset.id);
+  dragSel = {
+    ids, anchor, current: anchor, moved: false, x: e.clientX, y: e.clientY,
+    adding: !selection.ids.has(+tileEl.dataset.id), before: new Set(selection.ids), raf: 0,
+  };
+  document.body.classList.add("drag-selecting");
+  applyDragSelect();
+  window.addEventListener("mousemove", moveDragSelect);
+  window.addEventListener("mouseup", endDragSelect, { once: true });
+  window.addEventListener("blur", endDragSelect, { once: true });
+  dragSel.raf = requestAnimationFrame(autoScrollDragSelect);
+}
+function applyDragSelect() {
+  const { ids, anchor, current, adding, before } = dragSel;
+  selection.ids.clear();
+  for (const id of before) selection.ids.add(id);
+  for (let i = Math.min(anchor, current); i <= Math.max(anchor, current); i++) {
+    if (adding) selection.ids.add(ids[i]); else selection.ids.delete(ids[i]);
+  }
+  updateSelection();
+}
+function pickDragTile() {
+  const el = document.elementFromPoint(dragSel.x, dragSel.y)?.closest(".tile[data-id]");
+  const i = el ? dragSel.ids.indexOf(+el.dataset.id) : -1;
+  if (i >= 0 && i !== dragSel.current) {
+    dragSel.current = i;
+    dragSel.moved = true;
+    applyDragSelect();
+  }
+}
+function moveDragSelect(e) {
+  dragSel.x = e.clientX;
+  dragSel.y = e.clientY;
+  pickDragTile();
+}
+/** Near the top (below the sticky header) or bottom edge, scroll so the sweep can continue. */
+function autoScrollDragSelect() {
+  if (!dragSel) return;
+  const top = document.querySelector(".top").getBoundingClientRect().bottom + 40;
+  const bottom = innerHeight - 40;
+  const dy = dragSel.y < top ? -(top - dragSel.y) / 3 : dragSel.y > bottom ? (dragSel.y - bottom) / 3 : 0;
+  if (dy) { window.scrollBy(0, Math.max(-30, Math.min(30, dy))); pickDragTile(); }
+  dragSel.raf = requestAnimationFrame(autoScrollDragSelect);
+}
+function endDragSelect() {
+  if (!dragSel) return;
+  window.removeEventListener("mousemove", moveDragSelect);
+  window.removeEventListener("mouseup", endDragSelect);
+  window.removeEventListener("blur", endDragSelect);
+  cancelAnimationFrame(dragSel.raf);
+  document.body.classList.remove("drag-selecting");
+  if (dragSel.moved) { suppressTileClick = true; setTimeout(() => { suppressTileClick = false; }); }
+  dragSel = null;
+}
+
+const menu = $("contextMenu");
+function openMenu(e, items) {
+  menu.innerHTML = "";
+  for (const item of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.textContent = item.label;
+    b.onclick = () => { closeMenu(); item.run(); };
+    menu.appendChild(b);
+  }
+  menu.classList.remove("hidden");
+  // keep the whole menu on screen
+  const { width, height } = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(e.clientX, innerWidth - width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(e.clientY, innerHeight - height - 4))}px`;
+}
+function closeMenu() { menu.classList.add("hidden"); }
+const menuOpen = () => !menu.classList.contains("hidden");
+document.addEventListener("mousedown", (e) => { if (!menu.contains(e.target)) closeMenu(); });
+document.addEventListener("scroll", closeMenu, true);
+window.addEventListener("blur", closeMenu);
+window.addEventListener("resize", closeMenu);
+
+/** "Error invoking remote method 'x': Error: msg" → "msg" */
+const ipcMessage = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+const copyAction = (fn) => async () => {
+  try { await fn(); toast(t("toast.copied")); } catch (e) { toast(`Couldn't copy: ${ipcMessage(e)}`, 4000); }
+};
+
+const MAX_COPY = 10000; // same limit as the main process and the engine
+
+/** Right-click on a file. With other files selected, it joins the selection and the menu acts on all of them. */
+function fileMenu(e, r) {
+  if (selection.ids.size && !selection.ids.has(r.id)) { selection.ids.add(r.id); updateSelection(); }
+  if (selection.ids.size > 1) {
+    const ids = [...selection.ids];
+    const copy = copyAction(async () => { await window.mmf.copyFiles(ids); clearSelection(); });
+    return openMenu(e, [{
+      label: t("menu.copyFile"),
+      // over the limit: say so in the UI language and keep the selection (the main process rejects it anyway)
+      run: () => (ids.length > MAX_COPY ? toast(t("toast.tooMany", { max: num(MAX_COPY), n: num(ids.length) }), 4000) : copy()),
+    }]);
+  }
+  singleFileMenu(e, r);
+}
+function singleFileMenu(e, r) {
+  openMenu(e, [
+    { label: t("menu.revealFile"), run: () => window.mmf.reveal(r.id).catch((err) => toast(`Can't open: ${ipcMessage(err)}`)) },
+    r.kind === "image" && { label: t("menu.copyImage"), run: copyAction(() => window.mmf.copyImage(r.id)) },
+    { label: t("menu.copyFile"), run: copyAction(async () => {
+      await window.mmf.copyFiles([r.id]);
+      if (selection.ids.has(r.id)) clearSelection(); // copied the (single) selection
+    }) },
+    { label: t("menu.copyPath"), run: copyAction(() => window.mmf.copyPaths([r.id])) },
+  ].filter(Boolean));
 }
 
 // ---------- viewer ----------
@@ -267,11 +525,9 @@ function openViewer(list, i) {
   $("vPath").textContent = r.path;
   $("vScore").innerHTML = r.percent == null ? ""
     : `<span class="muted">${esc(t("viewer.relevance"))}</span> ${r.percent}% · <span class="muted">${esc(t("viewer.foundBy", { via: t(VIA_KEY[r.via] || "via.scene") }))}</span>`;
-  $("vOcr").classList.toggle("hidden", r.ocrDone || !state.ocr?.available);
-  if (!r.ocrDone) refreshViewerOcr();
   $("vSimilar").disabled = r.vid == null;
   $("vText").classList.toggle("hidden", !r.text);
-  $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t(r.via === "ocr" ? "viewer.ocrText" : "viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
+  $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t("viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
 
   const media = $("viewerMedia");
   media.innerHTML = "";
@@ -286,7 +542,7 @@ function openViewer(list, i) {
     v.controls = true;
     v.autoplay = true;
     v.onerror = () => {
-      media.innerHTML = `<div class="fallback"><img src="/thumb/${r.thumb}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
+      media.innerHTML = `<div class="fallback"><img src="/thumb/${esc(r.thumb)}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
     };
     media.appendChild(v);
   }
@@ -300,8 +556,8 @@ function openViewer(list, i) {
     r.moments.forEach((m) => {
       const btn = document.createElement("button");
       btn.className = "moment" + (m.t === r.t ? " on" : "");
-      const icon = m.modality === "audio" ? "🔊 " : m.modality === "ocr" ? "T " : "";
-      btn.innerHTML = `<img src="/thumb/${m.thumb}" alt=""><span>${icon}${fmtTime(m.t)}</span>`;
+      const icon = m.modality === "audio" ? "🔊 " : "";
+      btn.innerHTML = `<img src="/thumb/${esc(m.thumb)}" alt=""><span>${icon}${fmtTime(m.t)}</span>`;
       if (m.text) btn.title = m.text;
       btn.onclick = () => {
         const v = media.querySelector("video");
@@ -312,18 +568,6 @@ function openViewer(list, i) {
     });
     mom.appendChild(g);
   }
-}
-
-/** The viewer's "waiting to be recognized" line follows the file's current OCR state, not the search snapshot. */
-async function refreshViewerOcr() {
-  const r = viewerResult();
-  if (!r || r.ocrDone) return;
-  try {
-    if ((await post("/api/file", { id: r.id })).ocr_done) r.ocrDone = true;
-  } catch {
-    return;
-  }
-  if (viewerResult() === r) $("vOcr").classList.toggle("hidden", r.ocrDone || !state.ocr?.available);
 }
 
 function closeViewer() {
@@ -342,6 +586,11 @@ $("vOpen").onclick = fileAction(window.mmf.openFile);
 $("vSimilar").onclick = () => {
   const r = viewerResult();
   closeViewer();
+  searchSimilar(r);
+};
+
+/** Search with an indexed file's own vector (the viewer's "Find similar", or a tile dropped on the search). */
+function searchSimilar(r) {
   inputSeq++;
   hideRecent();
   state.imageBlob = null;
@@ -353,12 +602,29 @@ $("vSimilar").onclick = () => {
   showQueryImage(`/thumb/${r.thumb}`); // the chosen picture becomes the search, like "search by image"
   runSearch();
   window.scrollTo({ top: 0 });
+}
+
+$("viewerMedia").oncontextmenu = (e) => {
+  const r = viewerResult();
+  if (!r) return;
+  e.preventDefault();
+  singleFileMenu(e, r);
 };
 
 document.addEventListener("keydown", (e) => {
+  // the backup modal owns the keyboard while it is open: Esc closes it once the job is over
+  if (!$("jobModal").classList.contains("hidden")) {
+    if (e.key === "Escape") closeIndexJob();
+    return;
+  }
+  // any key dismisses an open menu (it acts on the file it was opened for, which arrows would change)
+  if (menuOpen()) { closeMenu(); if (e.key === "Escape") return; }
   const { list, index } = state.viewer;
   if (!list) {
-    if (e.key === "Escape") closeDrawers();
+    if (e.key === "Escape") {
+      if (selection.ids.size) clearSelection();
+      else closeDrawers();
+    }
     return;
   }
   if (e.key === "Escape") closeViewer();
@@ -367,47 +633,23 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- results deleted outside the app ----------
-// Coming back to the window, ask the engine which results on screen are gone and drop just those,
-// keeping loaded pages, scroll position and an open viewer.
-const PRUNE_BATCH = 1000;
-let pruneRun = Promise.resolve();
-let paging = null; // in-flight "show more" request: checks wait for it so offsets stay consistent
-let pruning = false;
+// Coming back to the window, list again: the engine drops files deleted meanwhile from what it returns.
+// Not while the user is paging or viewing (as with the refreshes during indexing); the next search covers that.
+window.addEventListener("focus", () => {
+  if (!isActive()) loadBrowse();
+  else if (!state.expanded && !state.viewer.list) runSearch();
+  autoIndex();
+});
 
-function pruneUnavailable() {
-  if (pruning) return pruneRun;
-  pruning = true;
-  pruneRun = prune().finally(() => { pruning = false; });
-  return pruneRun;
+// Coming back to the window also picks up new and changed files, like a launch does: only when there are
+// indexed folders, nothing is running, and not more than every 30 s (switching apps back and forth).
+let lastAutoIndex = Date.now(); // the launch has just started a run
+function autoIndex() {
+  const s = lastStatus;
+  if (!s?.folders.length || s.paused || s.progress.running || Date.now() - lastAutoIndex < 30000) return;
+  lastAutoIndex = Date.now();
+  post("/api/reindex").then(refreshStatus, () => {});
 }
-
-async function prune() {
-  if (paging) await paging.catch(() => {});
-  const lists = Object.values(state.lists);
-  const ids = [...new Set(lists.flatMap((l) => l.results.map((r) => r.id)))];
-  if (!ids.length) return;
-  try {
-    const gone = new Set();
-    for (let i = 0; i < ids.length; i += PRUNE_BATCH) {
-      for (const id of (await post("/api/unavailable", { ids: ids.slice(i, i + PRUNE_BATCH) })).ids) gone.add(id);
-    }
-    if (!gone.size) return;
-    const viewing = viewerResult();
-    for (const l of lists) {
-      const removed = l.results.filter((r) => gone.has(r.id)).length;
-      l.results = l.results.filter((r) => !gone.has(r.id));
-      l.total -= removed;
-      l.offset -= removed;
-    }
-    if (viewing && gone.has(viewing.id)) closeViewer();
-    else if (viewing) state.viewer.index = state.viewer.list.results.indexOf(viewing);
-    render();
-  } catch {
-    // engine unreachable: the next search filters deleted files anyway
-  }
-}
-window.addEventListener("focus", () => { pruneUnavailable(); if (!isActive()) loadBrowse(); });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) pruneUnavailable(); });
 
 // ---------- folder browser (start screen) ----------
 const BROWSE_PAGE = 200;
@@ -418,7 +660,7 @@ function readBrowseSort() {
   const s = store.get(SORT_KEY, {});
   browseSort = { key: s?.key === "mtime" ? "mtime" : "name", dir: s?.dir === "desc" ? "desc" : "asc" };
   $("sortKey").value = browseSort.key;
-  $("sortDir").value = browseSort.dir;
+  updateSortDir();
 }
 
 /** Folders and files are ordered here, so changing the order doesn't need a round trip to the engine. */
@@ -433,14 +675,21 @@ function sortBrowse(d) {
   d.files.sort(cmp);
 }
 function changeBrowseSort() {
-  browseSort = { key: $("sortKey").value, dir: $("sortDir").value };
+  browseSort = { key: $("sortKey").value, dir: browseSort.dir };
+  updateSortDir();
   store.set(SORT_KEY, browseSort);
   if (!browse.data) return;
   sortBrowse(browse.data);
   renderBrowse();
 }
 $("sortKey").onchange = changeBrowseSort;
-$("sortDir").onchange = changeBrowseSort;
+$("sortDir").onclick = () => { browseSort.dir = browseSort.dir === "asc" ? "desc" : "asc"; changeBrowseSort(); };
+/** The icon shows the current order; screen readers get its name (no hover tooltip). */
+function updateSortDir() {
+  const b = $("sortDir");
+  b.classList.toggle("desc", browseSort.dir === "desc");
+  b.setAttribute("aria-label", `${t("browser.sortBy")}: ${t(browseSort.dir === "desc" ? "sort.desc" : "sort.asc")}`);
+}
 
 function updateHome() {
   const home = !isActive();
@@ -459,6 +708,7 @@ async function loadBrowse(p = browse.path) {
     d = await api(`/api/browse${p ? `?path=${encodeURIComponent(p)}` : ""}`);
   } catch {
     if (p && seq === browse.seq) loadBrowse(null); // folder gone, removed or excluded: back to the top
+    else hideBoot();
     return;
   }
   if (seq !== browse.seq) return;
@@ -472,6 +722,14 @@ async function loadBrowse(p = browse.path) {
 
 function renderBrowse() {
   const d = browse.data;
+  hideBoot();
+  updateSelectAll();
+  // the browser also re-renders while hidden behind search results (a late listing, a language change):
+  // the selection then belongs to the results, so leave it alone
+  if (!isActive()) {
+    syncSelection(`folder ${d.path}`);
+    keepSelected(d.files.slice(0, browse.shown).filter((f) => f.indexed)); // only what is on screen (e.g. after re-sorting)
+  }
   const crumbs = $("crumbs");
   crumbs.innerHTML = "";
   const crumb = (label, p, current) => {
@@ -501,6 +759,10 @@ function renderBrowse() {
     b.title = dir.path;
     b.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg><span class="dn">${esc(dir.name)}</span><span class="dc">${num(dir.count)}</span>`;
     b.onclick = () => loadBrowse(dir.path);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      openMenu(e, [{ label: t("menu.revealFolder"), run: () => window.mmf.revealFolder(dir.path).catch((err) => toast(`Can't open: ${ipcMessage(err)}`)) }]);
+    };
     dirs.appendChild(b);
   }
 
@@ -534,7 +796,7 @@ function renderBrowse() {
   $("browseNote").textContent = !d.path ? ""
     : !d.files.length && !d.dirs.length ? t("browser.empty")
     : d.files.length ? [t("count.photos", { n: num(imgs) }), t("count.videos", { n: num(indexed.length - imgs) }),
-      pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) })].filter(Boolean).join(" · ") : "";
+      pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) })].filter(Boolean).join(" / ") : "";
 }
 
 // ---------- recent searches ----------
@@ -691,6 +953,7 @@ function goHome() {
   closeViewer();
   hideRecent();
   clearImage(false);
+  clearDates();
   state.query = "";
   $("q").value = "";
   history.replaceState(null, "", location.pathname);
@@ -698,6 +961,30 @@ function goHome() {
   window.scrollTo({ top: 0 });
 }
 $("homeBtn").onclick = goHome;
+
+// ---------- capture-date range ----------
+// The chosen days are local dates: the range runs from the start of the first to the end of the last.
+const startOfDay = (value) => (value ? new Date(`${value}T00:00`).getTime() : null);
+/** Local midnight after the given day (a calendar day, so a daylight-saving change doesn't shift it). */
+function dayAfter(value) {
+  const d = new Date(`${value}T00:00`);
+  d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+function readDates() {
+  let [from, to] = [$("dateFrom").value, $("dateTo").value];
+  if (from && to && from > to) { [from, to] = [to, from]; $("dateFrom").value = from; $("dateTo").value = to; }
+  state.after = startOfDay(from);
+  state.before = to ? dayAfter(to) : null; // the whole last day
+  $("dateClear").classList.toggle("hidden", !hasDates());
+}
+function clearDates() {
+  $("dateFrom").value = "";
+  $("dateTo").value = "";
+  readDates();
+}
+for (const id of ["dateFrom", "dateTo"]) $(id).onchange = () => { readDates(); inputSeq++; runSearch(); };
+$("dateClear").onclick = () => { clearDates(); inputSeq++; runSearch(); };
 
 function setImage(blob) {
   inputSeq++;
@@ -737,6 +1024,11 @@ document.addEventListener("paste", (e) => {
 });
 let dragDepth = 0;
 const DROP_TYPES = ["Files", "text/uri-list", "text/html"];
+// the tile last dragged out as files: dropped back on this window, it searches with the file's own vector
+// (like "Find similar") instead of uploading the file. Recognised by the dropped file's path, so another
+// file that merely has the same name isn't mistaken for it, however long ago the drag was.
+let outgoingDrag = null;
+const samePath = (a, b) => !!a && !!b && a.normalize("NFC") === b.normalize("NFC");
 document.addEventListener("dragenter", (e) => {
   if (DROP_TYPES.some((t) => e.dataTransfer.types.includes(t))) { dragDepth++; $("dropzone").classList.remove("hidden"); }
 });
@@ -747,6 +1039,15 @@ document.addEventListener("drop", (e) => {
   dragDepth = 0;
   $("dropzone").classList.add("hidden");
   const files = [...e.dataTransfer.files];
+  const own = outgoingDrag;
+  if (own && files.some((f) => samePath(window.mmf.pathForFile?.(f), own.r.path))) {
+    outgoingDrag = null;
+    const { r } = own;
+    // let go on the tile it came from: the drag was abandoned, not a search
+    if (+e.target.closest?.(".tile[data-id]")?.dataset.id === r.id) return;
+    if (r.vid != null) return searchSimilar(r);
+    return setImageFromUrl(`/thumb/${r.thumb}`); // no picture vector (e.g. a silent, frameless video)
+  }
   const f = files.find((x) => x.type.startsWith("image/")) || files[0];
   if (f) return setImage(f);
   const url = droppedImageUrl(e.dataTransfer);
@@ -770,8 +1071,10 @@ async function setImageFromUrl(url) {
   const seq = ++inputSeq;
   toast(t("toast.fetchingImage"));
   try {
-    // data: URLs are local; web images go through the engine (the page itself can't fetch other sites)
-    const res = url.startsWith("data:") ? await fetch(url) : await fetch(`/api/fetch_image?url=${encodeURIComponent(url)}`);
+    // data: URLs and our own pages are fetched directly (the engine's proxy has no session cookie, so its
+    // own addresses would be refused); other sites go through the engine, as the page can't fetch them itself
+    const local = url.startsWith("data:") || new URL(url, location.href).origin === location.origin;
+    const res = local ? await fetch(url) : await fetch(`/api/fetch_image?url=${encodeURIComponent(url)}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     const blob = await res.blob();
     if (seq === inputSeq) setImage(blob); // otherwise the user has moved on to another search
@@ -789,7 +1092,6 @@ function segment(id, attr, onPick) {
   };
 }
 segment("typeFilter", "type", (v) => { state.type = v; runSearch(); });
-$("viewSelect").onchange = (e) => { state.view = e.target.value; store.set("mmf.view", state.view); runSearch(); };
 $("useAudio").onchange = (e) => { state.audio = e.target.checked; runSearch(); };
 
 function renderExamples() {
@@ -826,21 +1128,218 @@ function applyLanguage(code) {
   }
   const platform = window.mmf?.platform;
   $("vReveal").textContent = t(platform === "darwin" ? "viewer.revealMac" : platform === "win32" ? "viewer.revealWin" : "viewer.revealLinux");
+  $("jobReveal").textContent = $("vReveal").textContent;
+  if (shownJob) renderIndexJob(shownJob);
   $("langSelect").value = lang;
+  syncDropdowns(); // the selected value and the option text just changed
+  updateSortDir();
   updatePlaceholder();
   renderExamples();
   renderRecent();
   render();
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
   if (lastStatus) renderStatus(lastStatus);
+  // once the saved language is known: the main process keeps these for a start without a window
+  if (prefsLoaded) window.mmf?.setTrayLabels?.({
+    open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice"),
+    jobQuitBackup: t("backup.quitBackup"), jobQuitRestore: t("backup.quitRestore"), keepRunning: t("backup.cancel"),
+  });
 }
 
 for (const [code, name] of LANGUAGES) $("langSelect").add(new Option(name, code));
+
+// ---------- dropdowns ----------
+// A styled <select>'s native pop-up drifts sideways on macOS (it lines its text up with the control's text, not
+// with the box), so each one gets a button and a list of our own. The <select> stays the source of truth: the
+// rest of the code keeps reading .value and listening for "change".
+let openDropdown = null; // { select, button, list }
+const dropdownSyncs = [];
+/** Show each select's current option on its button; call after setting a value or option text from code. */
+const syncDropdowns = () => dropdownSyncs.forEach((sync) => sync());
+function enhanceSelect(select) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dropdown-btn";
+  button.setAttribute("aria-haspopup", "listbox");
+  button.setAttribute("aria-expanded", "false");
+  select.after(button);
+  select.hidden = true;
+  const sync = () => { button.textContent = select.selectedOptions[0]?.textContent || ""; };
+  dropdownSyncs.push(sync);
+  select.addEventListener("change", sync);
+  button.onclick = () => (openDropdown?.select === select ? closeDropdown() : showDropdown(select, button));
+  button.onkeydown = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); showDropdown(select, button); }
+  };
+  sync();
+}
+function showDropdown(select, button) {
+  closeDropdown();
+  closeMenu();
+  const list = document.createElement("div");
+  list.className = "dropdown-menu";
+  list.setAttribute("role", "listbox");
+  for (const opt of select.options) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", opt.selected);
+    item.textContent = opt.textContent;
+    item.onclick = () => {
+      closeDropdown();
+      button.focus();
+      if (select.value === opt.value) return;
+      select.value = opt.value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    list.appendChild(item);
+  }
+  list.onkeydown = (e) => {
+    const items = [...list.children];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); items[Math.min(i + 1, items.length - 1)].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); items[Math.max(i - 1, 0)].focus(); }
+    else if (e.key === "Escape" || e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation(); // not the drawer's or the viewer's Esc
+      closeDropdown();
+      button.focus();
+    }
+  };
+  document.body.appendChild(list);
+  // right under the button, lined up with its edge (the far edge in right-to-left), kept on screen
+  const r = button.getBoundingClientRect();
+  list.style.minWidth = `${r.width}px`;
+  const { width, height } = list.getBoundingClientRect();
+  const left = document.documentElement.dir === "rtl" ? r.right - width : r.left;
+  list.style.left = `${Math.max(4, Math.min(left, innerWidth - width - 4))}px`;
+  list.style.top = `${r.bottom + 4 + height <= innerHeight - 4 ? r.bottom + 4 : Math.max(4, r.top - 4 - height)}px`;
+  button.setAttribute("aria-expanded", "true");
+  openDropdown = { select, button, list };
+  const current = list.querySelector('[aria-selected="true"]') || list.firstElementChild;
+  current?.focus();
+  current?.scrollIntoView({ block: "nearest" });
+}
+function closeDropdown() {
+  if (!openDropdown) return;
+  openDropdown.list.remove();
+  openDropdown.button.setAttribute("aria-expanded", "false");
+  openDropdown = null;
+}
+document.addEventListener("mousedown", (e) => {
+  if (openDropdown && !openDropdown.list.contains(e.target) && !openDropdown.button.contains(e.target)) closeDropdown();
+});
+document.addEventListener("scroll", (e) => { if (openDropdown && !openDropdown.list.contains(e.target)) closeDropdown(); }, true);
+window.addEventListener("resize", closeDropdown);
+window.addEventListener("blur", closeDropdown);
+for (const select of document.querySelectorAll("select")) enhanceSelect(select);
 $("langSelect").onchange = (e) => { store.set("mmf.lang", e.target.value); applyLanguage(e.target.value); };
 $("themeSelect").onchange = (e) => {
   store.set("mmf.theme", e.target.value);
   window.mmf?.setTheme(e.target.value); // the main process switches the page's light/dark preference
 };
+
+/**
+ * Startup and background options live in the main process (the OS login item, the tray), so ask it.
+ * Called straight away rather than with the saved settings, which wait for the engine's model loading.
+ */
+async function loadAppSettings() {
+  let s;
+  try { s = await window.mmf.getAppSettings(); } catch { return; }
+  const login = s.openAtLogin;
+  $("startupRow").classList.toggle("hidden", !login.shown);
+  $("startupCheck").disabled = !login.available; // development build: nothing to register
+  $("startupNote").classList.toggle("hidden", login.available);
+  showLoginItem(login);
+  $("backgroundRow").classList.toggle("hidden", s.runInBackground == null);
+  $("backgroundCheck").checked = !!s.runInBackground;
+}
+/** The login item as the OS has it; "Start in the background" belongs to it, so only shows while it's on. */
+function showLoginItem({ enabled, hidden }) {
+  $("startupCheck").checked = enabled;
+  $("startHiddenRow").classList.toggle("hidden", !enabled || hidden == null);
+  if (enabled && hidden != null) $("startHiddenCheck").checked = hidden; // while off, keep the choice for next time
+}
+async function setLoginItem(on) {
+  try { showLoginItem(await window.mmf.setOpenAtLogin(on, $("startHiddenCheck").checked)); }
+  catch (err) { toast(`Couldn't change the startup setting: ${err.message}`); loadAppSettings(); }
+}
+$("startupCheck").onchange = (e) => setLoginItem(e.target.checked);
+$("startHiddenCheck").onchange = () => setLoginItem(true);
+loadAppSettings();
+$("backgroundCheck").onchange = (e) => {
+  store.set("mmf.background", e.target.checked);
+  window.mmf.setRunInBackground(e.target.checked);
+};
+window.mmf?.onOpenSettings?.(() => openDrawer("settings")); // "Settings" in the tray menu
+
+// ---------- index backup / restore ----------
+// The main process runs the job; this modal shows it until it ends (or is canceled), asking for its state.
+let jobTimer = 0;
+let shownJob = null;
+async function pollIndexJob() {
+  let job;
+  try { job = await window.mmf.getIndexJob(); } catch { return; }
+  renderIndexJob(job);
+}
+function renderIndexJob(job) {
+  clearTimeout(jobTimer);
+  shownJob = job;
+  const modal = $("jobModal");
+  if (!job || job.state === "canceled") {
+    if (job && !modal.classList.contains("hidden")) toast(t("backup.canceled"));
+    modal.classList.add("hidden");
+    return;
+  }
+  const restore = job.kind === "restore";
+  const running = job.state === "running";
+  const done = job.state === "done";
+  modal.classList.remove("hidden");
+  closeMenu();
+  $("jobSpinner").classList.toggle("hidden", !running && !(done && restore));
+  $("jobTitle").textContent = t(running ? (restore ? "backup.restoring" : "backup.running")
+    : done ? (restore ? "backup.restoreDone" : "backup.done")
+    : restore ? "backup.restoreFailed" : "backup.failed");
+  const end = job.finishedAt || Date.now();
+  $("jobDetail").textContent = running
+    // time left and progress, always both: placeholders until there is enough to estimate
+    ? `${t("remaining", { time: jobSecondsLeft(job.progress) == null ? "--:--:--" : fmtTime(jobSecondsLeft(job.progress)) })}`
+      + ` · ${job.progress?.total ? Math.min(99, Math.floor((job.progress.done / job.progress.total) * 100)) : 0}%`
+    : done && !restore ? `${job.file}\n${t("backup.doneDetail", { time: fmtWhen(job.finishedAt), duration: fmtTime((end - job.startedAt) / 1000) })}`
+    : done ? ""
+    : job.error || ""; // errors stay in English
+  $("jobCancel").classList.toggle("hidden", !running);
+  $("jobClose").classList.toggle("hidden", running || (done && restore)); // a finished restore restarts the app
+  $("jobReveal").classList.toggle("hidden", !(done && !restore));
+  if (running) jobTimer = setTimeout(pollIndexJob, 500);
+}
+/** Seconds left from the pace since the archive (or the unpacking) started; null until a couple of seconds in. */
+function jobSecondsLeft(pr) {
+  if (!pr?.total || !pr.done || !pr.since) return null;
+  const elapsed = Date.now() - pr.since;
+  if (elapsed < 2000 || pr.done >= pr.total) return null;
+  return ((pr.total - pr.done) * elapsed) / pr.done / 1000;
+}
+
+function closeIndexJob() {
+  if (shownJob?.state === "running") return;
+  shownJob = null; // dismissed: a language change mustn't bring it back
+  $("jobModal").classList.add("hidden");
+}
+const startIndexJob = (start) => async () => {
+  closeDrawers();
+  try {
+    if (await start()) pollIndexJob();
+  } catch (e) { toast(ipcMessage(e), 4000); }
+};
+$("backupBtn").onclick = startIndexJob(() => window.mmf.startBackup(t("backup.pickFolder")));
+$("restoreBtn").onclick = startIndexJob(() => confirm(t("backup.restoreConfirm")) && window.mmf.startRestore(t("backup.pickFile")));
+$("jobCancel").onclick = () => window.mmf.cancelIndexJob();
+$("jobClose").onclick = closeIndexJob;
+$("jobReveal").onclick = () => window.mmf.revealBackup();
+window.mmf?.onIndexJob?.(renderIndexJob); // the end of a job, even if this page wasn't asking
+// e.g. the window was reopened in the middle of a backup
+window.mmf?.getIndexJob?.().then((job) => { if (job?.state === "running") renderIndexJob(job); }, () => {});
 
 // ---------- drawers, folders & status ----------
 function openDrawer(id) {
@@ -887,27 +1386,37 @@ $("pathForm").onsubmit = (e) => {
   const p = $("pathInput").value.trim();
   if (p) { addFolder(p); $("pathInput").value = ""; }
 };
-$("reindex").onclick = async () => { const r = await post("/api/reindex"); toast(t(r.started ? "toast.reindex" : "toast.alreadyIndexing")); refreshStatus(); };
-$("stopIndex").onclick = async () => { await post("/api/stop"); toast(t("toast.stopping")); };
+// ▶ / ⏸ next to the status line: a pause holds (launches and coming back to the window don't restart it) until ▶
+let pauseRequested = false; // shown at once, before the busy engine answers
+$("indexToggle").onclick = async () => {
+  const pausing = !!lastStatus?.progress.running;
+  if (pausing) {
+    pauseRequested = true;
+    $("indexToggle").classList.add("pausing");
+  }
+  try { await post(pausing ? "/api/pause" : "/api/resume"); } catch (e) {
+    pauseRequested = false;
+    $("indexToggle").classList.remove("pausing");
+    toast(e.message);
+  }
+  refreshStatus();
+};
 
 let lastDone = -1, wasRunning = false, lastStatus = null;
 async function refreshStatus() {
   let s;
-  try { s = await api("/api/status"); } catch { $("status").textContent = "Can't connect to the engine"; return; }
+  try { s = await api("/api/status"); } catch { $("status").textContent = "Can't connect to the engine"; hideBoot(); return; }
   const { progress: p, folders, stats } = s;
   lastStatus = s;
   state.progress = p;
-  state.ocr = stats.ocr;
-  updateOcrPendingNote();
-  if (p.ocr?.running) refreshViewerOcr();
   state.hasIndex = stats.images + stats.videos > 0;
+  if (!state.hasIndex) hideBoot(); // otherwise the folder listing replaces the placeholders
   $("welcome").classList.toggle("hidden", folders.length > 0);
   updateHome();
   renderStatus(s);
 
   // refresh visible results as new files land in the index (not while the user is paging or viewing)
-  // both counters: text recognition runs alongside indexing and adds matches of its own
-  const done = p.done + (p.ocr?.done || 0);
+  const done = p.done;
   if ((p.running && Math.floor(done / 10) !== Math.floor(lastDone / 10)) || (wasRunning && !p.running)) {
     if (isActive() && !state.viewer.list && !state.expanded) runSearch();
     else if (!isActive() && !state.viewer.list) loadBrowse(); // new thumbnails / counts
@@ -919,26 +1428,38 @@ async function refreshStatus() {
 /** Status line, progress bar and the folder drawer, drawn from the last /api/status answer. */
 function renderStatus(s) {
   const { progress: p, folders, stats } = s;
+  const toggle = $("indexToggle");
+  toggle.classList.toggle("hidden", !folders.length);
+  toggle.classList.toggle("running", p.running);
+  // paused but still running = finishing the file in hand before it stops (the engine keeps both flags)
+  if (!p.running) pauseRequested = false;
+  toggle.classList.toggle("pausing", p.running && (!!s.paused || pauseRequested));
+  toggle.setAttribute("aria-label", t(p.running ? "index.pause" : "index.start"));
   const counts = t("status.counts", { photos: num(stats.images), videos: num(stats.videos) });
   const eng = s.engine;
-  const engLabel = eng.status === "ready" ? `${s.model} · ${eng.device in DEVICE_KEYS ? t(DEVICE_KEYS[eng.device]) : eng.device}`
+  const engLabel = eng.status === "ready" ? `${s.model} / ${eng.device in DEVICE_KEYS ? t(DEVICE_KEYS[eng.device]) : eng.device}`
     : eng.status === "error" ? "Model error" : t("engine.loading", { model: s.model });
   $("status").title = eng.status === "error" ? eng.error || "" : "";
   if (p.running) {
     const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
     const cur = p.current ? p.current.split(/[\\/]/).pop() : "";
-    // text recognition can run alongside indexing, so it has its own counter
-    const o = p.ocr || {};
-    const ocrPart = o.running ? t("phase.ocr", { done: num(o.done), total: num(o.total) }) : "";
     const main = p.phase === "scanning" ? t("phase.scanning")
       : p.phase === "loading-model" ? t("phase.loadingModel")
-      : p.phase === "ocr" ? (ocrPart ? "" : t("phase.ocrPreparing"))
-      : `${t(p.phase === "names" ? "phase.names" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`;
-    $("status").textContent = [main, ocrPart, counts].filter(Boolean).join(" · ");
+      : `${t(p.phase === "names" ? "phase.names" : p.phase === "dates" ? "phase.updating" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
+    // the time left for the whole run (file names and indexing together, estimated by the engine), in bold
+    // right after what is being worked on
+    const eta = s.eta != null ? t("eta", { time: fmtTime(s.eta) }) : "";
+    const parts = [main, counts];
+    if (eta) parts.splice(1, 0, { bold: eta });
+    $("status").replaceChildren(...parts.flatMap((part, i) => {
+      const node = typeof part === "string" ? part : Object.assign(document.createElement("b"), { textContent: part.bold });
+      return i ? [" / ", node] : [node];
+    }));
     $("progress").classList.remove("hidden");
-    $("progressBar").style.width = `${p.phase === "ocr" && o.total ? Math.round((o.done / o.total) * 100) : pct}%`;
+    $("progressBar").style.width = `${pct}%`;
   } else {
-    $("status").textContent = `${counts} · ${engLabel}`;
+    const done = s.paused ? t("status.paused") : s.lastRun ? t("status.indexedAt", { time: fmtWhen(s.lastRun.finishedAt) }) : "";
+    $("status").textContent = [counts, done, engLabel].filter(Boolean).join(" / ");
     $("progress").classList.add("hidden");
   }
 
@@ -980,10 +1501,48 @@ function renderStatus(s) {
     li.appendChild(rm);
     ex.appendChild(li);
   });
-  $("statsLine").textContent = t("stats.line", { vectors: num(stats.vectors), text: num(stats.withText), engine: engLabel });
-  $("errorsBox").classList.toggle("hidden", !stats.errors.length);
-  $("errors").innerHTML = stats.errors.map((e) => `<li><b>${esc(e.path.split(/[\\/]/).pop())}</b><br>${esc(e.error || "")}</li>`).join("");
+  $("statsLine").textContent = t("stats.line", { vectors: num(stats.vectors), engine: engLabel });
+  renderErrors(stats.errors);
 }
+
+/** Files that couldn't be processed: each can be shown in its folder or taken off the list. */
+let errorsKey = "";
+function renderErrors(errors) {
+  $("errorsBox").classList.toggle("hidden", !errors.length);
+  // rebuilt only when it changes: the status comes every 1.5 s, and a rebuild could swallow a click
+  const key = `${lang}\n${errors.map((e) => `${e.id} ${e.error}`).join("\n")}`;
+  if (key === errorsKey) return;
+  errorsKey = key;
+  const platform = window.mmf?.platform;
+  const ul = $("errors");
+  ul.innerHTML = "";
+  for (const e of errors) {
+    const li = document.createElement("li");
+    li.innerHTML = `<div class="err-text"><b>${esc(e.path.split(/[\\/]/).pop())}</b><br>${esc(e.error || "")}</div>`;
+    if (window.mmf?.reveal) {
+      const reveal = document.createElement("button");
+      reveal.className = "icon-btn";
+      reveal.title = t(platform === "darwin" ? "viewer.revealMac" : platform === "win32" ? "viewer.revealWin" : "viewer.revealLinux");
+      reveal.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
+      reveal.onclick = () => window.mmf.reveal(e.id).catch((err) => toast(`Can't open: ${ipcMessage(err)}`));
+      li.appendChild(reveal);
+    }
+    const hide = document.createElement("button");
+    hide.className = "icon-btn";
+    hide.title = t("errors.hide");
+    hide.textContent = "×";
+    hide.onclick = async () => {
+      await post("/api/errors/hide", { ids: [e.id] }).catch((err) => toast(err.message));
+      refreshStatus();
+    };
+    li.appendChild(hide);
+    ul.appendChild(li);
+  }
+}
+$("clearErrors").onclick = async () => {
+  await post("/api/errors/hide", {}).catch((err) => toast(err.message));
+  refreshStatus();
+};
 const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.cpu" };
 
 (async () => {
@@ -992,9 +1551,8 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   prefsLoaded = true;
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
-  state.view = store.get("mmf.view", "image") === "text" ? "text" : "image";
-  $("viewSelect").value = state.view;
   readBrowseSort();
+  syncDropdowns();
   browse.path = store.get("mmf.browse", null);
   recent = store.get(RECENT_KEY, []).filter((x) => typeof x === "string").slice(0, RECENT_MAX);
   refreshStatus();

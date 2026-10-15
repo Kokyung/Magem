@@ -5,19 +5,16 @@ import path from "node:path";
 import * as embedder from "./embedder.mjs";
 import { VISUAL, VISUAL_AUDIO, toPercent } from "./indexer.mjs";
 import { badRequest } from "./errors.mjs";
-import { prepareImage } from "./media.mjs";
+import { clipboardPng, prepareImage } from "./media.mjs";
+import { checkIndexDb } from "./db-check.mjs";
 
 // Results below this relevance (%) are not shown at all.
 const MIN_RELEVANCE = 40;
 const relevance = (scale) => ({ percentOf: (score) => toPercent(score, scale), minPercent: MIN_RELEVANCE });
 
-// text-relevance sections; file names and recognized text are text-to-text matches (plus keywords),
-// which run hotter than text-to-image ones, so they use their own percent scale
-const TEXT_SECTIONS = {
-  name: { modalities: new Set(["name"]), ...relevance("section") },
-  ocr: { modalities: new Set(["ocr"]), ...relevance("section") },
-  audio: { modalities: new Set(["audio"]), ...relevance("text") },
-};
+// file and folder names that contain the query's words, ordered by keywords plus text-to-text meaning,
+// which run hotter than text-to-image matches, so they use their own percent scale
+const NAMES = { modalities: new Set(["name"]), ...relevance("section") };
 
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -28,8 +25,9 @@ const MIME = {
 };
 
 // UI settings the page stores here: its address (a random port) changes every launch, so the browser's
-// own storage would start empty each time
-const PREF_KEYS = new Set(["mmf.recent", "mmf.view", "mmf.browse", "mmf.lang", "mmf.theme", "mmf.browseSort"]);
+// own storage would start empty each time. The tray keys are the Electron main process's own.
+const PREF_KEYS = new Set(["mmf.recent", "mmf.browse", "mmf.lang", "mmf.theme", "mmf.browseSort", "mmf.background",
+  "mmf.trayLabels", "mmf.trayNotice"]);
 
 const IMAGE_FETCH_LIMIT = 25 << 20;
 
@@ -106,6 +104,9 @@ export function createServer({ index, staticDir, token, modelName }) {
     limit: Math.min(+(q.get("limit") || 60), 500),
     offset: +(q.get("offset") || 0),
     modalities: q.get("audio") === "0" ? VISUAL : VISUAL_AUDIO,
+    // capture-date range, ms since 1970 (the page turns the chosen local dates into these)
+    after: q.has("after") && Number.isFinite(+q.get("after")) ? +q.get("after") : null,
+    before: q.has("before") && Number.isFinite(+q.get("before")) ? +q.get("before") : null,
   });
 
   /**
@@ -151,6 +152,7 @@ export function createServer({ index, staticDir, token, modelName }) {
         if (p === "/api/status") {
           return json(res, {
             progress: index.progress, folders: index.folders(), excluded: index.excluded(), stats: index.stats(),
+            lastRun: index.pref("index.lastRun"), eta: index.eta(), paused: index.paused,
             model: modelName, engine: embedder.engine,
           });
         }
@@ -159,26 +161,29 @@ export function createServer({ index, staticDir, token, modelName }) {
           if (!text) return json(res, { results: [], total: 0 });
           const [vec] = await embedder.embedTexts([text]);
           const { d, scores } = await index.score(vec);
+          // two lists: files whose name or folder matches, then everything else by what they show (and say).
+          // A file is in one of them only: the second leaves out the first's matches. section=name|main pages
+          // one of them; the first request gets both, the names one at its own (smaller) page size.
           const params = searchParams(q);
-          if (q.get("view") !== "text") {
-            return json(res, index.rank(d, scores, { ...params, ...relevance("text") }));
+          const section = q.get("section");
+          const { ids: nameIds, ...names } = index.rank(d, index.nameScores(d, scores, text), {
+            ...params, ...NAMES, withIds: true,
+            ...(section === "name" ? {} : { offset: 0, limit: Math.min(+(q.get("nameLimit") || params.limit), 500) }),
+          });
+          const out = {};
+          if (section !== "main") out.name = names;
+          if (section !== "name") {
+            out.main = index.rank(d, scores, {
+              ...params, ...relevance("text"), excludeFiles: new Set(nameIds), ...(section === "main" ? {} : { offset: 0 }),
+            });
           }
-          // text relevance: one ranked list per section (or just the requested one, for paging)
-          const textScores = index.withKeywords(d, scores, text);
-          const wanted = q.get("section") ? [q.get("section")] : Object.keys(TEXT_SECTIONS);
-          const sections = {};
-          for (const name of wanted) {
-            const sec = TEXT_SECTIONS[name];
-            // photos have no sound: the speech section only applies when videos are included
-            if (!sec || (name === "audio" && (q.get("audio") === "0" || params.kind === "image"))) continue;
-            sections[name] = index.rank(d, name === "audio" ? scores : textScores, { ...params, ...sec });
-          }
-          return json(res, { sections });
+          return json(res, out);
         }
         if (p === "/api/browse") {
           return json(res, await index.browse(q.get("path") || null));
         }
         if (p === "/api/fetch_image") return await proxyImage(res, q.get("url"));
+        if (p === "/api/by_date") return json(res, index.byDate(searchParams(q)));
         if (p === "/api/similar") {
           const vec = index.visualVector(+q.get("vid"));
           if (!vec) return json(res, { error: "not found" }, 404);
@@ -198,7 +203,7 @@ export function createServer({ index, staticDir, token, modelName }) {
         const body = JSON.parse((await readBody(req, 1 << 20)).toString() || "{}");
         if (p === "/api/folders") {
           const added = index.addFolder(body.path);
-          index.start();
+          index.resume(); // adding a folder means "index this", even while paused
           return json(res, { ok: true, path: added });
         }
         if (p === "/api/folders/remove") {
@@ -215,17 +220,41 @@ export function createServer({ index, staticDir, token, modelName }) {
           index.removeExcluded(body.path);
           return json(res, { ok: true });
         }
-        if (p === "/api/reindex") return json(res, { started: index.start() });
-        if (p === "/api/stop") { index.stop(); return json(res, { ok: true }); }
-        if (p === "/api/unavailable") {
-          if (!Array.isArray(body.ids) || body.ids.length > 1000) return json(res, { error: "ids: send at most 1000 at a time" }, 400);
-          const ids = body.ids.map(Number).filter(Number.isInteger);
-          return json(res, { ids: index.unavailable(ids) });
+        if (p === "/api/reindex") return json(res, { started: index.startAuto() }); // coming back to the window
+        if (p === "/api/pause") { index.pause(); return json(res, { ok: true }); }
+        if (p === "/api/resume") return json(res, { started: index.resume() });
+        if (p === "/api/errors/hide") { // ids: some failed files; none: all of them
+          if (body.ids != null && (!Array.isArray(body.ids) || body.ids.length > 10000)) return json(res, { error: "ids: send at most 10,000" }, 400);
+          index.hideErrors(body.ids?.map(Number).filter(Number.isInteger) ?? null);
+          return json(res, { ok: true });
         }
         if (p === "/api/file") {
           const row = index.file(+body.id);
           return row ? json(res, row) : json(res, { error: "not found" }, 404);
         }
+        if (p === "/api/paths") {
+          if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 10000) return json(res, { error: "Select between 1 and 10,000 files" }, 400);
+          const paths = [];
+          for (const id of body.ids) {
+            const row = index.file(+id);
+            if (!row) return json(res, { error: "A selected file is no longer in the index" }, 404);
+            paths.push(row.path);
+          }
+          return json(res, { paths });
+        }
+        if (p === "/api/clipboard_image") {
+          const row = index.file(+body.id);
+          if (!row || row.kind !== "image") return json(res, { error: "not found" }, 404);
+          const png = await clipboardPng(row.path);
+          res.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length });
+          return res.end(png);
+        }
+        if (p === "/api/snapshot") return json(res, { dir: await index.snapshot() });
+        if (p === "/api/check_restore") { // only ever the staged database, whatever the request says
+          checkIndexDb(path.join(index.dataDir, "restore-staging", "index.db"));
+          return json(res, { ok: true });
+        }
+        if (p === "/api/folder") return json(res, { path: body.path, root: index.browsableRoot(body.path) });
       }
       return json(res, { error: "not found" }, 404);
     } catch (e) {

@@ -8,7 +8,6 @@ import { DatabaseSync } from "node:sqlite";
 import * as embedder from "./embedder.mjs";
 import { badRequest } from "./errors.mjs";
 import * as media from "./media.mjs";
-import * as ocr from "./ocr.mjs";
 
 const FRAME_MIN_INTERVAL = 2.0;
 const FRAME_MAX_INTERVAL = 30.0;
@@ -20,9 +19,13 @@ const AUDIO_MIN_DBFS = -45.0; // quieter chunks are skipped (silence matches eve
 const EMBED_BATCH = 4;
 const WORKERS = 3;
 const NAME_BATCH = 32;
-const OCR_WORKERS = 2;
-const OCR_MAX_FRAMES = 40; // per video
-const OCR_MAX_CHARS = 1000;
+// during the media pass, new files' names are embedded at least this often (search reloads every 10 s too)
+const NAME_CATCH_UP_MS = 10000;
+// Seconds of work per file (one worker), used for the time-left estimate before a run has measured its own.
+// Videos take far longer than photos, which is why they are counted apart. Replaced by real measurements,
+// which are kept across runs.
+const PACE_GUESS = { image: 1.5, video: 20, name: 0.01, date: 0.02 };
+const DATE_WORKERS = 4;
 
 // Generic queries used to estimate how much each vector matches "anything". Because the mean of dot
 // products equals the dot product with the mean, one averaged anchor vector is enough.
@@ -76,6 +79,9 @@ function nameDoc(file, folder) {
 /** Lowercase, drop whitespace and punctuation: "출입 금지!" and "출입금지" compare equal. */
 const normText = (t) => (t || "").normalize("NFC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 const LEXICAL_WEIGHT = 0.2;
+// a word found in the file's own name (not just a folder above it) counts this much more, so "2025" puts
+// DJI_20251024….MP4 ahead of the thousands of files that are only inside a "20251025 …" folder
+const FILE_NAME_WEIGHT = 0.15;
 
 /** Is `file` inside directory `dir` (which may be a drive root)? Compared in NFC: macOS may hand out
  *  either Unicode form. */
@@ -127,10 +133,25 @@ export class Index {
     const cols = (t) => this.db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
     if (!cols("files").includes("name_done")) this.db.exec("ALTER TABLE files ADD COLUMN name_done INTEGER DEFAULT 0");
     if (!cols("files").includes("ocr_done")) this.db.exec("ALTER TABLE files ADD COLUMN ocr_done INTEGER DEFAULT 0");
+    // when the photo or video was taken (ms; the file's modified time when it doesn't say); NULL = not read yet
+    if (!cols("files").includes("taken_at")) this.db.exec("ALTER TABLE files ADD COLUMN taken_at REAL");
+    // a failed file the user took off the "couldn't be processed" list (see hideErrors)
+    if (!cols("files").includes("error_hidden")) this.db.exec("ALTER TABLE files ADD COLUMN error_hidden INTEGER DEFAULT 0");
     if (!cols("vectors").includes("text")) this.db.exec("ALTER TABLE vectors ADD COLUMN text TEXT");
-    this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle", ocr: { running: false, total: 0, done: 0 } };
+    this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle" };
+    // text recognition (PaddleOCR) was removed: its entries no longer have anything to answer
+    this.db.exec("DELETE FROM vectors WHERE modality='ocr'");
+    const measured = Object.fromEntries(Object.entries(this.pref("index.pace") || {}).filter(([k]) => k in PACE_GUESS));
+    this._pace = { ...PACE_GUESS, ...measured };
+    this._paceMeasured = new Set(Object.keys(measured)); // the rest are still guesses
+    this._left = { image: 0, video: 0 }; // files of this run still to index
+    this._run = {}; // this run's measurements per kind of work: { prior, weight, seconds, count }
+    this._eta = null; // the estimate last shown, and when: { at, value }
     this._stop = false;
     this._running = null;
+    this._newNames = []; // files this run indexed whose names aren't embedded yet: { id, path, folder, thumb }
+    this._namesBusy = null; // a _catchUpNames() batch in progress
+    this._namesAt = 0; // when the last one ended
     this._matrix = null;
     this._dirty = true;
     this._anchor = null;
@@ -157,6 +178,72 @@ export class Index {
     return Object.fromEntries(this.db.prepare("SELECT key, value FROM prefs").all().map((r) => [r.key, JSON.parse(r.value)]));
   }
 
+  _removeThumb(thumb) {
+    fs.promises.rm(this._thumbPath(thumb), { force: true }).catch(() => {});
+  }
+
+  /** A thumbnail's file; only ever inside the thumbs folder, whatever the database says (e.g. a restored backup). */
+  _thumbPath(thumb) {
+    return path.join(this.thumbDir, path.basename(String(thumb)));
+  }
+
+  /**
+   * A copy of the database and thumbnails for a backup (into backup-tmp/). Indexing may go on meanwhile:
+   * thumbnails are only ever complete or absent (see media.mjs), and one the copy misses is made again by
+   * the first indexing run after a restore.
+   */
+  async snapshot() {
+    const dir = path.join(this.dataDir, "backup-tmp");
+    const thumbs = path.join(dir, "thumbs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.rmSync(path.join(dir, "index.db"), { force: true });
+    fs.rmSync(thumbs, { recursive: true, force: true });
+    this.db.exec(`VACUUM INTO '${path.join(dir, "index.db").replace(/'/g, "''")}'`);
+    fs.mkdirSync(thumbs);
+    for (const name of fs.readdirSync(this.thumbDir)) {
+      if (name.endsWith(media.TMP_SUFFIX)) continue;
+      // copy-on-write clones where the disk supports them (APFS), plain copies elsewhere
+      try { fs.copyFileSync(path.join(this.thumbDir, name), path.join(thumbs, name), fs.constants.COPYFILE_FICLONE); }
+      catch (e) { if (e.code !== "ENOENT") throw e; } // deleted since the listing
+    }
+    return dir;
+  }
+
+  /**
+   * Make again the thumbnails the index points to but that aren't on disk: a write cut short (the app was
+   * killed) or one a backup missed. Files about to be re-indexed (skipPaths) get new ones anyway.
+   * Thumbnails nothing points to (the app was killed before saving a file's entry, or a file was removed
+   * while its thumbnail was being made again) are deleted. Runs as a run starts, when no thumbnail is being written.
+   */
+  async _repairThumbs(skipPaths) {
+    const used = new Set(this.db.prepare(
+      "SELECT thumb FROM files WHERE thumb IS NOT NULL UNION SELECT thumb FROM vectors WHERE thumb IS NOT NULL",
+    ).all().map((r) => r.thumb));
+    const onDisk = new Set();
+    for (const name of await fs.promises.readdir(this.thumbDir)) {
+      // left by an interrupted write, or not part of the index
+      if (name.endsWith(media.TMP_SUFFIX) || !used.has(name)) this._removeThumb(name);
+      else onDisk.add(name);
+    }
+    // picture thumbnails only: file covers and the other kinds of entries reuse these
+    const missing = this.db.prepare(
+      `SELECT v.thumb, v.t, f.path, f.kind FROM vectors v JOIN files f ON f.id=v.file_id
+       WHERE f.status='done' AND v.modality IN ('image','frame') AND v.thumb IS NOT NULL`,
+    ).all().filter((r) => !onDisk.has(r.thumb) && !skipPaths.has(r.path));
+    for (const r of missing) {
+      if (this._stop) return;
+      const dest = this._thumbPath(r.thumb);
+      try {
+        await media.prepareImage(r.kind === "image" ? r.path : await media.videoFrame(r.path, r.t), dest);
+      } catch { /* unreadable now: the file shows without a picture until it is re-indexed */ }
+    }
+  }
+
+  pref(key) {
+    const row = this.db.prepare("SELECT value FROM prefs WHERE key=?").get(key);
+    return row ? JSON.parse(row.value) : null;
+  }
+
   setPref(key, value) {
     this.db.prepare("INSERT INTO prefs VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, JSON.stringify(value));
   }
@@ -180,7 +267,7 @@ export class Index {
 
   removeExcluded(p) {
     this.db.prepare("DELETE FROM excluded WHERE path=?").run(p);
-    this.start(); // bring its files back
+    this.resume(); // bring its files back (the user asked for it, so a pause ends here)
   }
 
   _isExcluded(file) {
@@ -201,7 +288,7 @@ export class Index {
     const delF = this.db.prepare("DELETE FROM files WHERE id=?");
     for (const id of ids) {
       for (const { thumb } of thumbs.all(id, id)) {
-        if (thumb && !keep.has(thumb)) fs.rm(path.join(this.thumbDir, thumb), { force: true }, () => {});
+        if (thumb && !keep.has(thumb)) this._removeThumb(thumb);
       }
       delV.run(id);
       delF.run(id);
@@ -224,6 +311,21 @@ export class Index {
   }
 
   stop() { this._stop = true; }
+
+  /** Paused by the user: automatic runs (launch, coming back to the window) wait until resume(). */
+  get paused() { return this.pref("index.paused") === true; }
+  pause() {
+    this.setPref("index.paused", true);
+    this.stop();
+  }
+  resume() {
+    this.setPref("index.paused", false);
+    return this.start();
+  }
+  /** A run nobody asked for explicitly: skipped while paused. */
+  startAuto() {
+    return this.paused ? false : this.start();
+  }
 
   _hasFolder(folder) {
     return !!this.db.prepare("SELECT 1 FROM folders WHERE path=?").get(folder);
@@ -282,9 +384,12 @@ export class Index {
   }
 
   _needsWork(it) {
-    const row = this.db.prepare("SELECT mtime, size, status FROM files WHERE path=?").get(it.path);
+    const row = this.db.prepare("SELECT mtime, size, status, error_hidden FROM files WHERE path=?").get(it.path);
     // the Python version stored float seconds; compare with a little slack
-    return !row || Math.abs(row.mtime - it.mtime) > 1e-3 || row.size !== it.size || row.status !== "done";
+    const changed = !row || Math.abs(row.mtime - it.mtime) > 1e-3 || row.size !== it.size;
+    // a failure taken off the list is only tried again once the file changes
+    if (!changed && row.status === "error" && row.error_hidden) return false;
+    return changed || row.status !== "done";
   }
 
   async _runIndex() {
@@ -292,6 +397,10 @@ export class Index {
     Object.assign(pr, { running: true, phase: "scanning", total: 0, done: 0, errors: 0, current: "" });
     try {
       const todo = (await this._scan()).filter((it) => this._needsWork(it));
+      // counted now so the estimate covers the indexing still to come during the passes below
+      this._left = { image: todo.filter((it) => it.kind === "image").length, video: todo.filter((it) => it.kind === "video").length };
+      if (!this._stop) await this._repairThumbs(new Set(todo.map((it) => it.path)));
+      if (!this._stop) await this._fillDates(); // files indexed before capture dates were kept
       // file names are quick to embed: cover the already-indexed files before the long media pass
       if (!this._stop) await this._enrichNames();
       Object.assign(pr, { phase: "scanning", total: 0, done: 0 });
@@ -302,29 +411,76 @@ export class Index {
         await embedder.load();
         pr.phase = "indexing";
       }
-      // text recognition for already-indexed files runs alongside, so a long media pass (e.g. hours of
-      // 4K video) can't hold it back indefinitely
-      // (files about to be re-indexed are left to the pass after it, so the two never work on one file)
-      const ocrBacklog = this._stop ? null : this._enrichOcr(new Set(todo.map((it) => it.path)));
       let next = 0;
+      this._newNames = [];
+      this._namesAt = Date.now();
       const worker = async () => {
         while (!this._stop && next < todo.length) {
-          await this._indexOne(todo[next++]);
+          const it = todo[next++];
+          const t0 = Date.now();
+          await this._indexOne(it);
+          this._measure(it.kind, Date.now() - t0);
+          this._left[it.kind]--;
           pr.done++;
+          this._catchUpNames(); // not awaited: the names wait in the model's queue, not this worker
         }
       };
       await Promise.all(Array.from({ length: WORKERS }, worker));
-      if (!this._stop) await this._enrichNames();
-      await ocrBacklog;
-      pr.phase = "ocr";
-      if (!this._stop) await this._enrichOcr(); // files indexed in this run
+      // also when stopped or paused: what was indexed can then be found by name too
+      await this._catchUpNames({ all: true });
+      if (!this._stop) await this._enrichNames(); // any whose batch failed above
+      // a run that got to the end (not stopped): when the index was last complete, shown in the status line
+      if (!this._stop) this.setPref("index.lastRun", { finishedAt: Date.now() });
     } catch (e) {
       pr.errors++;
       pr.fatal = e.message;
     } finally {
       Object.assign(pr, { running: false, phase: "idle", current: "" });
+      this._left = { image: 0, video: 0 };
+      this._run = {};
+      this._eta = null;
       this._dirty = true;
+      // the next run's estimate starts from these (only kinds actually measured)
+      this.setPref("index.pace", Object.fromEntries([...this._paceMeasured].map((k) => [k, this._pace[k]])));
     }
+  }
+
+  /**
+   * Seconds per file (per worker) for one kind of work: the average over this whole run, so one unusually
+   * long or short file barely moves it. A pace measured on an earlier run counts as a few files to start
+   * with; a mere guess is dropped at the first measurement.
+   */
+  _measure(kind, ms) {
+    const r = (this._run[kind] ??= { prior: this._pace[kind], weight: this._paceMeasured.has(kind) ? 3 : 0, seconds: 0, count: 0 });
+    r.seconds += ms / 1000;
+    r.count++;
+    this._pace[kind] = (r.prior * r.weight + r.seconds) / (r.weight + r.count);
+    this._paceMeasured.add(kind);
+  }
+
+  /** Seconds until the whole run is done (file names, then photos and videos); null when unknown. */
+  eta() {
+    const pr = this.progress;
+    if (!pr.running || pr.phase === "scanning") return null;
+    const p = this._pace;
+    const left = this._left;
+    // photos go first, then videos: the workers split each stretch, but a few videos can't use all of them
+    const indexing = (left.image * p.image) / WORKERS + (left.video ? (left.video * p.video) / Math.min(WORKERS, left.video) : 0);
+    const newFiles = left.image + left.video;
+    const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name;
+    const dates = pr.phase === "dates" ? ((pr.total - pr.done) * p.date) / DATE_WORKERS : 0;
+    const raw = dates + names + indexing;
+    // shown: counts down with the clock and eases toward each new estimate (over ~15 s), so it doesn't jump
+    // back and forth as files of different lengths finish
+    const now = Date.now();
+    if (this._eta) {
+      const dt = (now - this._eta.at) / 1000;
+      const ticking = Math.max(this._eta.value - dt, 0);
+      this._eta = { at: now, value: ticking + (raw - ticking) * (1 - Math.exp(-dt / 15)) };
+    } else {
+      this._eta = { at: now, value: raw };
+    }
+    return Math.round(this._eta.value);
   }
 
   async _indexOne(it) {
@@ -332,8 +488,9 @@ export class Index {
     this.progress.current = it.path;
     try {
       const { duration, thumb, vecs } = it.kind === "image" ? await this._processImage(it.path) : await this._processVideo(it.path);
+      const taken = (await media.captureTime(it.path, it.kind).catch(() => null)) ?? it.mtime * 1000;
       if (!this._hasFolder(it.folder) || this._isExcluded(it.path)) { // removed/excluded while being processed
-        for (const t of new Set([thumb, ...vecs.map((v) => v.thumb)])) fs.rm(path.join(this.thumbDir, t), { force: true }, () => {});
+        for (const t of new Set([thumb, ...vecs.map((v) => v.thumb)])) if (t) this._removeThumb(t);
         return;
       }
       const old = this.db.prepare("SELECT id FROM files WHERE path=?").get(it.path);
@@ -341,11 +498,12 @@ export class Index {
       try {
         if (old) this._deleteFiles([old.id], new Set([thumb, ...vecs.map((v) => v.thumb)]));
         const { lastInsertRowid: fid } = this.db.prepare(
-          "INSERT INTO files (path, kind, folder, mtime, size, duration, thumb, status, indexed_at) VALUES (?,?,?,?,?,?,?,'done',?)",
-        ).run(it.path, it.kind, it.folder, it.mtime, it.size, duration, thumb, Date.now() / 1000);
+          "INSERT INTO files (path, kind, folder, mtime, size, duration, thumb, status, indexed_at, taken_at) VALUES (?,?,?,?,?,?,?,'done',?,?)",
+        ).run(it.path, it.kind, it.folder, it.mtime, it.size, duration, thumb, Date.now() / 1000, taken);
         const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec) VALUES (?,?,?,?,?,?)");
         for (const v of vecs) ins.run(fid, v.modality, v.t, v.tEnd, v.thumb, vecBlob(v.vec));
         this.db.exec("COMMIT");
+        this._newNames.push({ id: fid, path: it.path, folder: it.folder, thumb });
       } catch (e) {
         this.db.exec("ROLLBACK");
         throw e;
@@ -357,7 +515,7 @@ export class Index {
       this.progress.errors++;
       this.db.prepare(
         `INSERT INTO files (path, kind, folder, mtime, size, status, error, indexed_at) VALUES (?,?,?,?,?,'error',?,?)
-         ON CONFLICT(path) DO UPDATE SET status='error', error=excluded.error, mtime=excluded.mtime, size=excluded.size`,
+         ON CONFLICT(path) DO UPDATE SET status='error', error=excluded.error, mtime=excluded.mtime, size=excluded.size, error_hidden=0`,
       ).run(it.path, it.kind, it.folder, it.mtime, it.size, String(e.message).slice(0, 500), Date.now() / 1000);
     }
   }
@@ -429,87 +587,118 @@ export class Index {
   }
 
   // ---------- enrichment: file names and text in images ----------
+  /** Capture dates for indexed files that don't have one yet (indexed before dates were kept). */
+  async _fillDates() {
+    const todo = this.db.prepare("SELECT id, path, kind, mtime FROM files WHERE status='done' AND taken_at IS NULL").all();
+    if (!todo.length) return;
+    const pr = this.progress;
+    Object.assign(pr, { phase: "dates", total: todo.length, done: 0, current: "" });
+    const set = this.db.prepare("UPDATE files SET taken_at=? WHERE id=? AND path=?");
+    let next = 0;
+    const worker = async () => {
+      while (!this._stop && next < todo.length) {
+        const f = todo[next++];
+        const t0 = Date.now();
+        let t;
+        try {
+          t = await media.captureTime(f.path, f.kind);
+        } catch {
+          pr.done++;
+          continue; // can't be read now (e.g. an unplugged drive): left unknown, tried again on a later run
+        }
+        set.run(t ?? f.mtime * 1000, f.id, f.path);
+        this._measure("date", Date.now() - t0);
+        pr.done++;
+      }
+    };
+    await Promise.all(Array.from({ length: DATE_WORKERS }, worker));
+  }
+
+  /**
+   * Files taken in [after, before) (ms; either may be null), newest first: the results when only a date
+   * range is set. Same shape as rank()'s results.
+   */
+  byDate({ after = null, before = null, kind = "all", limit = 60, offset = 0 } = {}) {
+    const where = ["status='done'", "taken_at IS NOT NULL"];
+    const args = [];
+    if (after != null) { where.push("taken_at >= ?"); args.push(after); }
+    if (before != null) { where.push("taken_at < ?"); args.push(before); }
+    if (kind !== "all") { where.push("kind = ?"); args.push(kind); }
+    // an indexed folder that is missing entirely (e.g. an unplugged drive): its files are left out
+    const offline = this.db.prepare("SELECT path FROM folders").all().map((r) => r.path).filter((p) => !fs.existsSync(p));
+    for (const p of offline) { where.push("folder <> ?"); args.push(p); }
+    const sql = `FROM files WHERE ${where.join(" AND ")}`;
+    const { total } = this.db.prepare(`SELECT COUNT(*) AS total ${sql}`).get(...args);
+    const rows = this.db.prepare(
+      `SELECT id, path, kind, duration, thumb,
+        (SELECT id FROM vectors WHERE file_id=files.id AND modality IN ('image','frame') ORDER BY t LIMIT 1) AS vid
+       ${sql} ORDER BY taken_at DESC LIMIT ? OFFSET ?`,
+    ).all(...args, limit, offset);
+    return {
+      total,
+      results: rows.map((f) => ({
+        id: f.id, path: f.path, name: path.basename(f.path), kind: f.kind, duration: f.duration, thumb: f.thumb,
+        vid: f.vid, moments: [],
+      })),
+    };
+  }
+
+  /** The "names" phase: every indexed file still without a name vector (those indexed before, mostly). */
   async _enrichNames() {
     const todo = this.db.prepare("SELECT id, path, folder, thumb FROM files WHERE status='done' AND name_done=0").all();
     if (!todo.length) return;
     const pr = this.progress;
     Object.assign(pr, { phase: "names", total: todo.length, done: 0, current: "" });
     await embedder.load();
+    for (let i = 0; i < todo.length && !this._stop; i += NAME_BATCH) {
+      const batch = todo.slice(i, i + NAME_BATCH);
+      await this._embedNames(batch);
+      pr.done += batch.length;
+    }
+  }
+
+  /**
+   * Names of the files this run has just indexed, while the media pass goes on: a batch once NAME_BATCH
+   * have piled up or NAME_CATCH_UP_MS have passed, so a file can be found by its name or folder shortly
+   * after it is indexed rather than only once the whole run is over. Leaves the progress shown alone.
+   * all: everything left, also after a stop or pause (it's a few seconds at most), and a run in progress
+   * is waited for.
+   */
+  async _catchUpNames({ all = false } = {}) {
+    if (this._namesBusy) {
+      if (!all) return;
+      await this._namesBusy;
+    }
+    const due = this._newNames.length >= NAME_BATCH || Date.now() - this._namesAt >= NAME_CATCH_UP_MS;
+    if (!this._newNames.length || (!all && !due)) return;
+    this._namesBusy = (async () => {
+      do await this._embedNames(this._newNames.splice(0, NAME_BATCH));
+      while (all && this._newNames.length);
+    })()
+      // left with name_done=0: the next run's names phase picks them up
+      .catch(() => {})
+      .finally(() => { this._namesBusy = null; this._namesAt = Date.now(); });
+    return this._namesBusy;
+  }
+
+  /** Embed and store the names of these indexed files ({ id, path, folder, thumb }). */
+  async _embedNames(files) {
+    const batch = files.map((f) => ({ ...f, ...nameDoc(f.path, f.folder) }));
+    const t0 = Date.now();
+    const vecs = await embedder.embedDocs(batch.map((b) => b.doc));
+    this._measure("name", (Date.now() - t0) / batch.length);
+    // a file deleted or re-indexed meanwhile gets nothing (its new row is queued again)
     const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec, text) SELECT ?, 'name', NULL, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM files WHERE id=?)");
     const mark = this.db.prepare("UPDATE files SET name_done=1 WHERE id=?");
-    for (let i = 0; i < todo.length && !this._stop; i += NAME_BATCH) {
-      const batch = todo.slice(i, i + NAME_BATCH).map((f) => ({ ...f, ...nameDoc(f.path, f.folder) }));
-      const vecs = await embedder.embedDocs(batch.map((b) => b.doc));
-      this.db.exec("BEGIN");
+    this.db.exec("BEGIN");
+    try {
       batch.forEach((f, k) => { ins.run(f.id, f.thumb, vecBlob(vecs[k]), f.display, f.id); mark.run(f.id); });
       this.db.exec("COMMIT");
-      pr.done += batch.length;
-      this._dirty = true;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
     }
-  }
-
-  async _enrichOcr(skipPaths = new Set()) {
-    if (!ocr.ready()) return;
-    // images first; videos need frames re-extracted, so they come last
-    const todo = this.db.prepare(
-      "SELECT id, path, kind FROM files WHERE status='done' AND ocr_done=0 ORDER BY kind='video', path",
-    ).all().filter((f) => !skipPaths.has(f.path));
-    if (!todo.length) return;
-    const pr = this.progress.ocr;
-    Object.assign(pr, { running: true, total: todo.length, done: 0 });
-    let next = 0;
-    const worker = async () => {
-      while (!this._stop && next < todo.length) {
-        const f = todo[next++];
-        try {
-          if (!(await this._ocrFile(f))) continue; // stopped midway: retry on the next run
-        } catch {
-          this.progress.errors++; // unreadable now; don't retry on every launch
-        }
-        this.db.prepare("UPDATE files SET ocr_done=1 WHERE id=? AND path=?").run(f.id, f.path);
-        pr.done++;
-      }
-    };
-    try {
-      await Promise.all(Array.from({ length: OCR_WORKERS }, worker));
-    } finally {
-      pr.running = false;
-    }
-  }
-
-  /** Returns false if stopped before finishing. */
-  async _ocrFile(f) {
-    const found = []; // {t, thumb, text}
-    if (f.kind === "image") {
-      const text = await ocr.recognize(await media.loadRaw(f.path, ocr.INPUT_SIZE));
-      const { thumb } = this.db.prepare("SELECT thumb FROM files WHERE id=?").get(f.id) || {};
-      if (meaningful(text)) found.push({ t: null, thumb, text });
-    } else {
-      let frames = this.db.prepare("SELECT t, thumb FROM vectors WHERE file_id=? AND modality='frame' ORDER BY t").all(f.id);
-      if (frames.length > OCR_MAX_FRAMES) {
-        const step = frames.length / OCR_MAX_FRAMES;
-        frames = Array.from({ length: OCR_MAX_FRAMES }, (_, i) => frames[Math.floor(i * step)]);
-      }
-      let prev = "";
-      for (const fr of frames) {
-        if (this._stop) return false;
-        const jpg = await media.videoFrame(f.path, fr.t, ocr.INPUT_SIZE).catch(() => null);
-        if (!jpg?.length) continue;
-        const text = await ocr.recognize(await media.loadRaw(jpg, ocr.INPUT_SIZE));
-        // captions and signs stay on screen across frames: keep only changes
-        if (meaningful(text) && text !== prev) found.push({ t: fr.t, thumb: fr.thumb, text });
-        prev = text;
-      }
-    }
-    if (!found.length) return true;
-    const vecs = await embedder.embedDocs(found.map((x) => `title: none | text: ${x.text.slice(0, OCR_MAX_CHARS)}`));
-    // the row must still be this file: ids can be reused once a file is removed from the index
-    const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec, text) SELECT ?, 'ocr', ?, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM files WHERE id=? AND path=?)");
-    this.db.exec("BEGIN");
-    found.forEach((x, k) => ins.run(f.id, x.t, x.thumb, vecBlob(vecs[k]), x.text, f.id, f.path));
-    this.db.exec("COMMIT");
     this._dirty = true;
-    return true;
   }
 
   // ---------- search ----------
@@ -537,14 +726,10 @@ export class Index {
       M, base, dim, n: rows.length, builtAt: Date.now(),
       vid: rows.map((r) => r.id), fid: rows.map((r) => r.file_id),
       mod: rows.map((r) => r.modality), t: rows.map((r) => r.t), thumb: rows.map((r) => r.thumb),
-      norm: rows.map((r) => (r.text ? normText(r.text) : null)), // for keyword matching on names / OCR text
+      norm: rows.map((r) => (r.text ? normText(r.text) : null)), // for keyword matching on file and folder names
+      fileNorm: rows.map((r) => (r.text ? normText(r.text.split(" / ").pop()) : null)), // the file's own name
     };
     return this._matrix;
-  }
-
-  vector(vid) {
-    const r = this.db.prepare("SELECT vec FROM vectors WHERE id=?").get(vid);
-    return r ? blobVec(r.vec) : null;
   }
 
   /** A file's picture vector for "find similar", whichever section the result came from. */
@@ -565,18 +750,24 @@ export class Index {
   }
 
   /**
-   * Add a keyword component to name/OCR scores: the share of query words (2+ characters) found in the
-   * text. Semantic similarity alone under-rates exact words buried in long recognized text.
+   * Scores for the "file & folder names" list: only names that contain the query's words (2+ characters;
+   * a query of only shorter ones uses those) take part; the rest get -Infinity, which rank() skips.
+   * Meaning alone ("김치볶음밥" for "음식") is left to the search by what the files show. Among the names
+   * that do contain them, the share of words found (more for the file's own name) and closeness in
+   * meaning set the order.
    */
-  withKeywords(d, scores, query) {
-    const words = [...new Set(query.split(/\s+/).map(normText).filter((w) => w.length >= 2))];
-    if (!words.length) return scores;
-    const out = Float32Array.from(scores);
-    for (let i = 0; i < d.n; i++) {
+  nameScores(d, scores, query) {
+    const all = [...new Set(query.split(/\s+/).map(normText).filter(Boolean))];
+    const long = all.filter((w) => w.length >= 2);
+    const words = long.length ? long : all;
+    const out = new Float32Array(d.n).fill(-Infinity);
+    for (let i = 0; i < d.n && words.length; i++) {
       const t = d.norm[i];
       if (!t) continue;
       const hits = words.filter((w) => t.includes(w)).length;
-      if (hits) out[i] += (LEXICAL_WEIGHT * hits) / words.length;
+      if (!hits) continue;
+      const own = words.filter((w) => d.fileNorm[i]?.includes(w)).length;
+      out[i] = scores[i] + (LEXICAL_WEIGHT * hits + FILE_NAME_WEIGHT * own) / words.length;
     }
     return out;
   }
@@ -597,37 +788,41 @@ export class Index {
   }
 
   /**
-   * Rank files by their best-matching vector among `modalities`.
+   * Rank files by their best-matching vector among `modalities` (a -Infinity score takes no part).
    * percentOf: turns a score into the relevance % shown to the user; results below minPercent are
    * left out.
    */
-  rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, percentOf = null, minPercent = 0 } = {}) {
+  rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, excludeFiles = null, percentOf = null, minPercent = 0, withIds = false, after = null, before = null } = {}) {
     if (!d.n) return { results: [], total: 0 };
     const order = [];
-    for (let i = 0; i < d.n; i++) if (modalities.has(d.mod[i])) order.push(i);
+    for (let i = 0; i < d.n; i++) if (modalities.has(d.mod[i]) && scores[i] > -Infinity) order.push(i);
     order.sort((a, b) => scores[b] - scores[a]);
 
     // group by file: the best vector decides the rank; keep top moments for videos
     const best = new Map();
     for (const i of order) {
       const fid = d.fid[i];
-      if (fid === excludeFile) continue;
+      if (fid === excludeFile || excludeFiles?.has(fid)) continue;
       let m = best.get(fid);
       if (!m) best.set(fid, (m = { score: scores[i], moments: [] }));
       if (m.moments.length < 6) m.moments.push({ vid: d.vid[i], t: d.t[i], modality: d.mod[i], thumb: d.thumb[i], score: scores[i] });
     }
 
-    const meta = new Map(this.db.prepare("SELECT id, path, kind, duration, thumb, folder, ocr_done FROM files").all().map((r) => [r.id, r]));
+    const meta = new Map(this.db.prepare("SELECT id, path, kind, duration, thumb, folder, taken_at FROM files").all().map((r) => [r.id, r]));
     // an indexed folder that is missing entirely (e.g. an unplugged drive): hide its files, keep them indexed
     const offline = new Set(this.db.prepare("SELECT path FROM folders").all().map((r) => r.path).filter((p) => !fs.existsSync(p)));
     let results = [];
     for (const [fid, m] of best) {
       const f = meta.get(fid);
       if (!f || (kind !== "all" && f.kind !== kind)) continue;
+      // a date range only keeps files whose capture date is known and inside it
+      if (after != null || before != null) {
+        if (f.taken_at == null || (after != null && f.taken_at < after) || (before != null && f.taken_at >= before)) continue;
+      }
       if (offline.has(f.folder)) continue;
       const top = m.moments[0];
       results.push({
-        id: fid, path: f.path, name: path.basename(f.path), kind: f.kind, duration: f.duration, ocrDone: !!f.ocr_done,
+        id: fid, path: f.path, name: path.basename(f.path), kind: f.kind, duration: f.duration,
         thumb: (f.kind === "video" && top.thumb) || f.thumb, score: Math.round(m.score * 1e4) / 1e4,
         t: top.t, via: top.modality, vid: top.vid,
         moments: f.kind === "video" ? dedupeMoments(m.moments.filter((x) => x.t != null)).sort((a, b) => a.t - b.t) : [],
@@ -651,13 +846,11 @@ export class Index {
       this._deleteFiles(deleted);
       this._dirty = true;
     }
-    // name/OCR hits carry the matched text so the UI can show why they matched
+    // name hits carry the matched text so the UI can show why they matched
     const textOf = this.db.prepare("SELECT text FROM vectors WHERE id=?");
-    for (const r of page) {
-      if (r.via === "name" || r.via === "ocr") r.text = textOf.get(r.vid)?.text || "";
-      for (const m of r.moments) if (m.modality === "ocr") m.text = textOf.get(m.vid)?.text || "";
-    }
-    return { results: page, total: results.length };
+    for (const r of page) if (r.via === "name") r.text = textOf.get(r.vid)?.text || "";
+    // withIds: every matching file, not just this page (the names list's are left out of the list below it)
+    return { results: page, total: results.length, ...(withIds && { ids: results.map((r) => r.id) }) };
   }
 
   /**
@@ -665,6 +858,15 @@ export class Index {
    * files in it. Without a path, the indexed folders themselves. Only paths inside indexed folders are
    * listed, with the scanner's skip rules (hidden, excluded, …) applied.
    */
+  /** The indexed folder `dir` belongs to; throws unless `dir` is inside one and not excluded. */
+  browsableRoot(dir, roots = this.db.prepare("SELECT path FROM folders").all().map((r) => r.path)) {
+    if (typeof dir !== "string" || !dir) throw badRequest("Only folders inside indexed folders can be browsed");
+    const root = roots.find((r) => r.normalize("NFC") === dir.normalize("NFC") || isInside(dir, r));
+    const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
+    if (!root || excluded.has(dir.normalize("NFC")) || this._isExcluded(dir)) throw badRequest("Only folders inside indexed folders can be browsed");
+    return root;
+  }
+
   async browse(dir) {
     const roots = this.db.prepare("SELECT path FROM folders ORDER BY added_at").all().map((r) => r.path);
     // indexed paths are root + names as read from disk, the same form `dir` arrives in (it comes from an
@@ -682,9 +884,8 @@ export class Index {
       }));
       return { path: null, root: null, dirs, files: [] };
     }
-    const root = roots.find((r) => r.normalize("NFC") === dir.normalize("NFC") || isInside(dir, r));
+    const root = this.browsableRoot(dir, roots);
     const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
-    if (!root || excluded.has(dir.normalize("NFC")) || this._isExcluded(dir)) throw badRequest("Only folders inside indexed folders can be browsed");
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
 
     // indexed files per immediate subfolder, in one pass over the index
@@ -695,7 +896,7 @@ export class Index {
       const i = f.indexOf(path.sep, pre.length);
       if (i > pre.length) { const child = f.slice(pre.length, i); childCounts.set(child, (childCounts.get(child) || 0) + 1); }
     }
-    const fileRow = this.db.prepare("SELECT id, path, kind, duration, thumb, ocr_done, status FROM files WHERE path=?");
+    const fileRow = this.db.prepare("SELECT id, path, kind, duration, thumb, status FROM files WHERE path=?");
     const firstVisual = this.db.prepare("SELECT id FROM vectors WHERE file_id=? AND modality IN ('image','frame') ORDER BY t LIMIT 1");
     const dirs = [];
     const files = [];
@@ -716,51 +917,36 @@ export class Index {
       if (!e.isFile() || e.name.startsWith(".") || !kind) continue;
       const f = fileRow.get(full);
       files.push(f && f.status === "done"
-        ? { id: f.id, path: f.path, name, mtime, kind: f.kind, duration: f.duration, thumb: f.thumb, ocrDone: !!f.ocr_done, vid: firstVisual.get(f.id)?.id ?? null, indexed: true }
+        ? { id: f.id, path: f.path, name, mtime, kind: f.kind, duration: f.duration, thumb: f.thumb, vid: firstVisual.get(f.id)?.id ?? null, indexed: true }
         : { path: full, name, mtime, kind, indexed: false, failed: f?.status === "error" });
     }
     return { path: dir, root, dirs, files };
   }
 
-
-  /**
-   * Of the given file ids (results on screen), which are no longer available? Deleted files are dropped
-   * from the index; files of a missing indexed folder (e.g. an unplugged drive) are only reported.
-   */
-  unavailable(ids) {
-    const get = this.db.prepare("SELECT path, folder FROM files WHERE id=?");
-    const out = [];
-    const deleted = [];
-    for (const id of ids) {
-      const f = get.get(id);
-      if (!f) out.push(id);
-      else if (isGone(f.path)) {
-        out.push(id);
-        if (fs.existsSync(f.folder)) deleted.push(id);
-      }
-    }
-    if (deleted.length) {
-      this._deleteFiles(deleted);
-      this._dirty = true;
-    }
-    return out;
+  file(id) {
+    return this.db.prepare("SELECT path, kind FROM files WHERE id=?").get(id);
   }
 
-  file(id) {
-    return this.db.prepare("SELECT path, kind, ocr_done FROM files WHERE id=?").get(id);
+  /**
+   * Take failed files off the "couldn't be processed" list (all of them when ids is null). They aren't
+   * tried again until the file changes; if it then fails again, it is listed again (see _needsWork).
+   */
+  hideErrors(ids = null) {
+    if (!ids) {
+      this.db.exec("UPDATE files SET error_hidden=1 WHERE status='error'");
+      return;
+    }
+    const hide = this.db.prepare("UPDATE files SET error_hidden=1 WHERE id=? AND status='error'");
+    this.db.exec("BEGIN");
+    for (const id of ids) hide.run(id);
+    this.db.exec("COMMIT");
   }
 
   stats() {
     const c = Object.fromEntries(this.db.prepare("SELECT kind, COUNT(*) AS n FROM files WHERE status='done' GROUP BY kind").all().map((r) => [r.kind, r.n]));
-    const errors = this.db.prepare("SELECT path, error FROM files WHERE status='error' ORDER BY indexed_at DESC LIMIT 20").all();
+    const errors = this.db.prepare("SELECT id, path, error FROM files WHERE status='error' AND error_hidden=0 ORDER BY indexed_at DESC LIMIT 20").all();
     const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM vectors").get();
-    const { texts } = this.db.prepare("SELECT COUNT(DISTINCT file_id) AS texts FROM vectors WHERE modality='ocr'").get();
-    const pending = Object.fromEntries(this.db.prepare("SELECT kind, COUNT(*) AS n FROM files WHERE status='done' AND ocr_done=0 GROUP BY kind").all().map((r) => [r.kind, r.n]));
-    return {
-      images: c.image || 0, videos: c.video || 0, vectors: n, withText: texts, errors,
-      // text recognition still to do (it runs last, while the app is open)
-      ocr: { available: ocr.ready(), pendingImages: pending.image || 0, pendingVideos: pending.video || 0 },
-    };
+    return { images: c.image || 0, videos: c.video || 0, vectors: n, errors };
   }
 }
 

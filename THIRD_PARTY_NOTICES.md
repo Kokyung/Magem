@@ -9,8 +9,6 @@ with them (in `node_modules/<package>/` and the model folders) and apply to thos
 | Model | Source | License |
 |---|---|---|
 | EmbeddingGemma 2 (ONNX: fp16 text/vision, q8 audio) | [onnx-community/embeddinggemma-2-ONNX](https://huggingface.co/onnx-community/embeddinggemma-2-ONNX), from [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2) | Apache-2.0 |
-| PaddleOCR PP-OCRv5 mobile text detector | [PaddlePaddle/PP-OCRv5_mobile_det_onnx](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx) | Apache-2.0 |
-| PaddleOCR PP-OCRv5 Korean text recognizer | [PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx](https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx) | Apache-2.0 |
 
 ## Main components
 
@@ -81,6 +79,7 @@ Generated from the installed `package.json` files of every production dependency
 | `@types/node@24.19.1` | MIT |
 | `adm-zip@0.6.1` | MIT |
 | `agent-base@6.0.2` | MIT |
+| `buffer-crc32@1.0.0` | MIT |
 | `buffer-from@1.1.2` | MIT |
 | `caseless@0.12.0` | Apache-2.0 |
 | `concat-stream@2.0.0` | MIT |
@@ -92,6 +91,7 @@ Generated from the installed `package.json` files of every production dependency
 | `es-define-property@1.0.1` | MIT |
 | `es-errors@1.3.0` | MIT |
 | `escape-string-regexp@4.0.0` | MIT |
+| `exifr@7.1.3` | MIT |
 | `ffmpeg-static@5.3.0` | GPL-3.0-or-later |
 | `flatbuffers@25.9.23` | Apache-2.0 |
 | `global-agent@4.1.3` | BSD-3-Clause |
@@ -113,6 +113,7 @@ Generated from the installed `package.json` files of every production dependency
 | `onnxruntime-node@1.30.0` | MIT |
 | `onnxruntime-web@1.31.0-dev.20260914-8d85527a0` | MIT |
 | `parse-cache-control@1.0.1` | BSD-3-Clause |
+| `pend@1.2.0` | MIT |
 | `platform@1.3.6` | MIT |
 | `progress@2.0.3` | MIT |
 | `protobufjs@7.6.6` | BSD-3-Clause |
@@ -126,3 +127,6 @@ Generated from the installed `package.json` files of every production dependency
 | `typedarray@0.0.6` | MIT |
 | `undici-types@7.24.6` | MIT |
 | `util-deprecate@1.0.2` | MIT |
+| `yauzl@3.4.0` | MIT |
+| `yazl@3.3.1` | MIT |
+| `zip-lib@1.4.0` | MIT |

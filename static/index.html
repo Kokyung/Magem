@@ -40,6 +40,7 @@
 </header>
 
 <div class="toolbar">
+  <div class="toolbar-filters">
   <div class="seg" id="typeFilter" role="tablist">
     <button data-type="all" class="on" data-i18n="filter.all"></button>
     <button data-type="image" data-i18n="filter.photos"></button>
@@ -48,18 +49,34 @@
   <label class="toggle" data-i18n-title="audio.tip">
     <input type="checkbox" id="useAudio" checked> <span data-i18n="audio.label"></span>
   </label>
-  <label class="select-field hidden" id="viewMode">
-    <span data-i18n="view.label"></span>
-    <select id="viewSelect">
-      <option value="image" data-i18n="view.image"></option>
-      <option value="text" data-i18n="view.text"></option>
-    </select>
-  </label>
-  <div class="status" id="status"></div>
+  <div class="date-filter" id="dateFilter">
+    <input type="date" id="dateFrom" max="9999-12-31">
+    <span aria-hidden="true">~</span>
+    <input type="date" id="dateTo" max="9999-12-31">
+    <button class="icon-btn date-clear hidden" id="dateClear" type="button" data-i18n-label="date.clear">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  </div>
+  <div class="status-group">
+    <div class="status" id="status"></div>
+    <button class="icon-btn index-toggle hidden" id="indexToggle" type="button">
+      <svg class="play" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+      <svg class="pause" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
+    </button>
+  </div>
 </div>
 <div class="progress hidden" id="progress"><div id="progressBar"></div></div>
 
 <main>
+  <section class="boot" id="bootSkeleton" aria-hidden="true">
+    <span class="sk sk-line"></span>
+    <div class="chips"><span class="sk"></span><span class="sk"></span><span class="sk"></span><span class="sk"></span><span class="sk"></span><span class="sk"></span></div>
+    <div class="browser">
+      <div class="browser-head"><span class="sk sk-line"></span></div>
+      <div id="bootGrid"></div>
+    </div>
+  </section>
   <section class="empty hidden" id="welcome">
     <h1 data-i18n="welcome.title"></h1>
     <p data-i18n-html="welcome.body"></p>
@@ -73,24 +90,32 @@
     <div class="browser-head">
       <h2 data-i18n="browser.title"></h2>
       <nav class="crumbs" id="crumbs"></nav>
-      <label class="select-field sort">
-        <span data-i18n="browser.sortBy"></span>
-        <select id="sortKey">
-          <option value="name" data-i18n="sort.name"></option>
-          <option value="mtime" data-i18n="sort.modified"></option>
-        </select>
-        <select id="sortDir">
-          <option value="asc" data-i18n="sort.asc"></option>
-          <option value="desc" data-i18n="sort.desc"></option>
-        </select>
-      </label>
+      <button class="select-all hidden" id="browseSelectAll" type="button" role="checkbox"><span class="round-check"></span><span data-i18n="select.all"></span></button>
+      <div class="sort">
+        <label class="select-field">
+          <span data-i18n="browser.sortBy"></span>
+          <select id="sortKey">
+            <option value="name" data-i18n="sort.name"></option>
+            <option value="mtime" data-i18n="sort.modified"></option>
+          </select>
+        </label>
+        <button class="icon-btn sort-dir" id="sortDir" type="button">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path class="asc" d="M3 6h5M3 12h8M3 18h11M19 5v14M16 16l3 3 3-3"/>
+            <path class="desc" d="M3 6h11M3 12h8M3 18h5M19 19V5M16 8l3-3 3 3"/>
+          </svg>
+        </button>
+      </div>
     </div>
     <div class="dir-list" id="dirList"></div>
     <div class="grid" id="browseGrid"></div>
     <div class="more" id="browseMore"></div>
     <p class="muted small" id="browseNote"></p>
   </section>
-  <div class="summary" id="summary"></div>
+  <div class="results-bar">
+    <div class="summary" id="summary"></div>
+    <button class="select-all hidden" id="resultsSelectAll" type="button" role="checkbox"><span class="round-check"></span><span data-i18n="select.all"></span></button>
+  </div>
   <div id="results"></div>
 </main>
 
@@ -112,13 +137,13 @@
     </div>
     <p class="muted small sub-note" data-i18n="excluded.note"></p>
     <ul class="folders" id="excludedList"></ul>
-    <div class="row">
-      <button class="ghost" id="reindex" data-i18n="drawer.reindex"></button>
-      <button class="ghost" id="stopIndex" data-i18n="drawer.stop"></button>
-    </div>
     <p class="muted small" id="statsLine"></p>
     <details id="errorsBox" class="hidden">
       <summary data-i18n="errors.title"></summary>
+      <div class="errors-head">
+        <p class="muted small" data-i18n="errors.note"></p>
+        <button class="ghost" id="clearErrors" data-i18n="errors.clearAll"></button>
+      </div>
       <ul id="errors" class="errors"></ul>
     </details>
   </div>
@@ -141,6 +166,32 @@
         <option value="dark" data-i18n="theme.dark"></option>
       </select>
     </label>
+    <div class="hidden" id="startupRow">
+      <label class="setting-check">
+        <input type="checkbox" id="startupCheck"> <span data-i18n="settings.startup"></span>
+      </label>
+      <p class="muted small setting-note hidden" id="startupNote" data-i18n="settings.startupUnavailable"></p>
+      <div class="setting-sub hidden" id="startHiddenRow">
+        <label class="setting-check">
+          <input type="checkbox" id="startHiddenCheck" checked> <span data-i18n="settings.startHidden"></span>
+        </label>
+        <p class="muted small setting-note" data-i18n="settings.startHiddenNote"></p>
+      </div>
+    </div>
+    <div class="hidden" id="backgroundRow">
+      <label class="setting-check">
+        <input type="checkbox" id="backgroundCheck"> <span data-i18n="settings.background"></span>
+      </label>
+      <p class="muted small setting-note" data-i18n="settings.backgroundNote"></p>
+    </div>
+    <div class="setting">
+      <span data-i18n="backup.title"></span>
+      <div class="row">
+        <button class="ghost" id="backupBtn" type="button" data-i18n="backup.backup"></button>
+        <button class="ghost" id="restoreBtn" type="button" data-i18n="backup.restore"></button>
+      </div>
+      <p class="muted small backup-note" data-i18n="backup.note"></p>
+    </div>
   </div>
 </aside>
 <div class="scrim" id="scrim"></div>
@@ -152,7 +203,6 @@
     <h3 id="vName"></h3>
     <p class="muted small path" id="vPath"></p>
     <p class="small" id="vScore"></p>
-    <p class="small muted hidden" id="vOcr" data-i18n="viewer.ocrPending"></p>
     <div id="vText" class="hidden"></div>
     <div id="vMoments"></div>
     <div class="col">
@@ -166,6 +216,19 @@
 
 <div class="dropzone hidden" id="dropzone"><div data-i18n="dropzone"></div></div>
 <div class="toast hidden" id="toast"></div>
+<div class="context-menu hidden" id="contextMenu" role="menu"></div>
+<div class="modal hidden" id="jobModal" role="dialog" aria-modal="true" aria-labelledby="jobTitle">
+  <div class="modal-card">
+    <div class="spinner" id="jobSpinner" aria-hidden="true"></div>
+    <h3 id="jobTitle"></h3>
+    <p class="muted small" id="jobDetail"></p>
+    <div class="row modal-actions">
+      <button class="ghost hidden" id="jobReveal" type="button"></button>
+      <button class="ghost hidden" id="jobCancel" type="button" data-i18n="backup.cancel"></button>
+      <button class="primary hidden" id="jobClose" type="button" data-i18n="close"></button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
