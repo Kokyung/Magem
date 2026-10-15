@@ -91,6 +91,7 @@ Generated from the installed `package.json` files of every production dependency
 | `es-define-property@1.0.1` | MIT |
 | `es-errors@1.3.0` | MIT |
 | `escape-string-regexp@4.0.0` | MIT |
+| `exifr@7.1.3` | MIT |
 | `ffmpeg-static@5.3.0` | GPL-3.0-or-later |
 | `flatbuffers@25.9.23` | Apache-2.0 |
 | `global-agent@4.1.3` | BSD-3-Clause |

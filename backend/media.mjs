@@ -1,6 +1,7 @@
 // Decoding and resizing of photos, video frames and audio — all via bundled binaries (sharp, ffmpeg),
 // so nothing depends on tools installed on the user's machine.
 import { spawn } from "node:child_process";
+import exifr from "exifr";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -139,6 +140,29 @@ async function decodeAndResize(src, thumbPath) {
     }
   }
   return new RawImage(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height, 3);
+}
+
+/**
+ * When a photo or video was taken (ms since 1970), or null if the file doesn't say. Photos: EXIF
+ * DateTimeOriginal (else CreateDate), read as local time like the camera's clock; videos: the creation_time
+ * the camera or phone wrote into the container (UTC). Implausible values (before 1990, in the future) are ignored.
+ * Throws if the file can't be read at all (e.g. its drive is unplugged): that is "unknown for now", not "no date".
+ */
+export async function captureTime(file, kind) {
+  await fs.access(file);
+  let t = null;
+  try {
+    if (kind === "image") {
+      const tags = await exifr.parse(file, { pick: ["DateTimeOriginal", "CreateDate"] });
+      const d = tags?.DateTimeOriginal || tags?.CreateDate;
+      if (d instanceof Date) t = d.getTime();
+    } else {
+      const r = await run(ffmpegBinary(), ["-hide_banner", "-nostdin", "-i", file], { timeout: 60000 });
+      const m = /creation_time\s*:\s*(\S+)/.exec(r.stderr);
+      if (m) t = Date.parse(m[1]);
+    }
+  } catch { /* unreadable or no metadata */ }
+  return Number.isFinite(t) && t >= Date.UTC(1990, 0, 1) && t <= Date.now() + 86400000 ? t : null;
 }
 
 /** Duration (s) and whether the file has an audio stream. */

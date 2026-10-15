@@ -34,6 +34,7 @@ const state = {
   seq: 0, hasIndex: false, progress: null,
   viewer: { list: null, index: -1 },
   searching: 0,         // seq of an image search still waiting for its first page (shows placeholders)
+  after: null, before: null, // capture-date range (ms), from the date filter
   loadedInput: -1,      // the search input the results on screen belong to
 };
 
@@ -79,10 +80,15 @@ function highlight(text, query) {
 
 // ---------- search ----------
 const isTextQuery = () => !!state.query && !state.imageBlob && state.similarVid == null;
-const isActive = () => !!(state.query || state.imageBlob || state.similarVid != null);
+const hasDates = () => state.after != null || state.before != null;
+// a date range alone also shows results: the files taken in it, newest first
+const isActive = () => !!(state.query || state.imageBlob || state.similarVid != null || hasDates());
 
 function baseParams(limit, offset) {
-  return new URLSearchParams({ type: state.type, audio: state.audio ? "1" : "0", limit, offset });
+  const p = new URLSearchParams({ type: state.type, audio: state.audio ? "1" : "0", limit, offset });
+  if (state.after != null) p.set("after", state.after);
+  if (state.before != null) p.set("before", state.before);
+  return p;
 }
 
 /** Re-run the whole search (append=false) or fetch the next page of one list. */
@@ -112,6 +118,8 @@ async function runSearch(append = null) {
       });
     } else if (state.query) {
       await loadText(seq, append);
+    } else if (hasDates()) {
+      await loadMain(seq, append, (p) => api(`/api/by_date?${p}`));
     } else {
       state.lists = {};
       render();
@@ -170,7 +178,7 @@ function render() {
   box.innerHTML = "";
   if (!active) { $("summary").textContent = ""; return; }
   hideBoot();
-  syncSelection(`results ${inputSeq} ${state.type} ${state.audio}`); // the filters change what is shown
+  syncSelection(`results ${inputSeq} ${state.type} ${state.audio} ${state.after} ${state.before}`); // the filters change what is shown
   keepSelected(Object.values(state.lists).flatMap((l) => l.results));
   if (state.searching === state.seq && !state.lists.main) { // only the latest search: a superseded one doesn't count
     $("summary").innerHTML = `<span class="sk sk-line"></span>`;
@@ -181,7 +189,7 @@ function render() {
   const { name, main } = state.lists;
   if (isTextQuery()) {
     // files whose name or folder matches first, then everything else, each under its heading
-    const label = t("summary.query", { q: state.query });
+    const label = withRange(t("summary.query", { q: state.query }));
     const total = (name?.total || 0) + (main?.total || 0);
     $("summary").textContent = total ? t("summary.count", { label, n: num(total) }) : t("summary.none", { label });
     if (name?.total) box.appendChild(resultSection("name", name, "name"));
@@ -189,12 +197,20 @@ function render() {
     return;
   }
   if (main) {
+    const byImage = state.imageBlob || state.similarVid != null;
     const label = state.imageBlob ? t("summary.byImage") : t("summary.similar");
-    const shown = state.query ? t("summary.imagePlus", { q: state.query }) : label;
+    const shown = !byImage ? rangeLabel() : withRange(state.query ? t("summary.imagePlus", { q: state.query }) : label);
     $("summary").textContent = main.total ? t("summary.count", { label: shown, n: num(main.total) }) : t("summary.none", { label: shown });
     box.appendChild(listBlock("main", main));
   }
 }
+
+/** The chosen capture-date range, as shown in the summary ("Jul 1, 2025 ~ Aug 31, 2025", "~ Aug 31, 2025"). */
+function rangeLabel() {
+  const day = (ms) => new Intl.DateTimeFormat(lang, { dateStyle: "medium" }).format(new Date(ms));
+  return `${state.after != null ? day(state.after) : ""} ~ ${state.before != null ? day(state.before - 1) : ""}`.trim();
+}
+const withRange = (label) => (hasDates() ? `${label} · ${rangeLabel()}` : label);
 
 /** A headed block of results (heading key: sec.<name>.title). */
 function resultSection(key, list, heading) {
@@ -915,6 +931,7 @@ function goHome() {
   closeViewer();
   hideRecent();
   clearImage(false);
+  clearDates();
   state.query = "";
   $("q").value = "";
   history.replaceState(null, "", location.pathname);
@@ -922,6 +939,30 @@ function goHome() {
   window.scrollTo({ top: 0 });
 }
 $("homeBtn").onclick = goHome;
+
+// ---------- capture-date range ----------
+// The chosen days are local dates: the range runs from the start of the first to the end of the last.
+const startOfDay = (value) => (value ? new Date(`${value}T00:00`).getTime() : null);
+/** Local midnight after the given day (a calendar day, so a daylight-saving change doesn't shift it). */
+function dayAfter(value) {
+  const d = new Date(`${value}T00:00`);
+  d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+function readDates() {
+  let [from, to] = [$("dateFrom").value, $("dateTo").value];
+  if (from && to && from > to) { [from, to] = [to, from]; $("dateFrom").value = from; $("dateTo").value = to; }
+  state.after = startOfDay(from);
+  state.before = to ? dayAfter(to) : null; // the whole last day
+  $("dateClear").classList.toggle("hidden", !hasDates());
+}
+function clearDates() {
+  $("dateFrom").value = "";
+  $("dateTo").value = "";
+  readDates();
+}
+for (const id of ["dateFrom", "dateTo"]) $(id).onchange = () => { readDates(); inputSeq++; runSearch(); };
+$("dateClear").onclick = () => { clearDates(); inputSeq++; runSearch(); };
 
 function setImage(blob) {
   inputSeq++;

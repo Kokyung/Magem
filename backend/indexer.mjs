@@ -22,7 +22,8 @@ const NAME_BATCH = 32;
 // Seconds of work per file (one worker), used for the time-left estimate before a run has measured its own.
 // Videos take far longer than photos, which is why they are counted apart. Replaced by real measurements,
 // which are kept across runs.
-const PACE_GUESS = { image: 1.5, video: 20, name: 0.01 };
+const PACE_GUESS = { image: 1.5, video: 20, name: 0.01, date: 0.02 };
+const DATE_WORKERS = 4;
 
 // Generic queries used to estimate how much each vector matches "anything". Because the mean of dot
 // products equals the dot product with the mean, one averaged anchor vector is enough.
@@ -130,6 +131,8 @@ export class Index {
     const cols = (t) => this.db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
     if (!cols("files").includes("name_done")) this.db.exec("ALTER TABLE files ADD COLUMN name_done INTEGER DEFAULT 0");
     if (!cols("files").includes("ocr_done")) this.db.exec("ALTER TABLE files ADD COLUMN ocr_done INTEGER DEFAULT 0");
+    // when the photo or video was taken (ms; the file's modified time when it doesn't say); NULL = not read yet
+    if (!cols("files").includes("taken_at")) this.db.exec("ALTER TABLE files ADD COLUMN taken_at REAL");
     if (!cols("vectors").includes("text")) this.db.exec("ALTER TABLE vectors ADD COLUMN text TEXT");
     this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle" };
     // text recognition (PaddleOCR) was removed: its entries no longer have anything to answer
@@ -383,6 +386,7 @@ export class Index {
     try {
       const todo = (await this._scan()).filter((it) => this._needsWork(it));
       if (!this._stop) await this._repairThumbs(new Set(todo.map((it) => it.path)));
+      if (!this._stop) await this._fillDates(); // files indexed before capture dates were kept
       // file names are quick to embed: cover the already-indexed files before the long media pass
       if (!this._stop) await this._enrichNames();
       Object.assign(pr, { phase: "scanning", total: 0, done: 0 });
@@ -438,7 +442,8 @@ export class Index {
     const indexing = (left.image * p.image) / WORKERS + (left.video ? (left.video * p.video) / Math.min(WORKERS, left.video) : 0);
     const newFiles = left.image + left.video;
     const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name;
-    return Math.round(names + indexing);
+    const dates = pr.phase === "dates" ? ((pr.total - pr.done) * p.date) / DATE_WORKERS : 0;
+    return Math.round(dates + names + indexing);
   }
 
   async _indexOne(it) {
@@ -446,6 +451,7 @@ export class Index {
     this.progress.current = it.path;
     try {
       const { duration, thumb, vecs } = it.kind === "image" ? await this._processImage(it.path) : await this._processVideo(it.path);
+      const taken = (await media.captureTime(it.path, it.kind).catch(() => null)) ?? it.mtime * 1000;
       if (!this._hasFolder(it.folder) || this._isExcluded(it.path)) { // removed/excluded while being processed
         for (const t of new Set([thumb, ...vecs.map((v) => v.thumb)])) if (t) this._removeThumb(t);
         return;
@@ -455,8 +461,8 @@ export class Index {
       try {
         if (old) this._deleteFiles([old.id], new Set([thumb, ...vecs.map((v) => v.thumb)]));
         const { lastInsertRowid: fid } = this.db.prepare(
-          "INSERT INTO files (path, kind, folder, mtime, size, duration, thumb, status, indexed_at) VALUES (?,?,?,?,?,?,?,'done',?)",
-        ).run(it.path, it.kind, it.folder, it.mtime, it.size, duration, thumb, Date.now() / 1000);
+          "INSERT INTO files (path, kind, folder, mtime, size, duration, thumb, status, indexed_at, taken_at) VALUES (?,?,?,?,?,?,?,'done',?,?)",
+        ).run(it.path, it.kind, it.folder, it.mtime, it.size, duration, thumb, Date.now() / 1000, taken);
         const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec) VALUES (?,?,?,?,?,?)");
         for (const v of vecs) ins.run(fid, v.modality, v.t, v.tEnd, v.thumb, vecBlob(v.vec));
         this.db.exec("COMMIT");
@@ -543,6 +549,62 @@ export class Index {
   }
 
   // ---------- enrichment: file names and text in images ----------
+  /** Capture dates for indexed files that don't have one yet (indexed before dates were kept). */
+  async _fillDates() {
+    const todo = this.db.prepare("SELECT id, path, kind, mtime FROM files WHERE status='done' AND taken_at IS NULL").all();
+    if (!todo.length) return;
+    const pr = this.progress;
+    Object.assign(pr, { phase: "dates", total: todo.length, done: 0, current: "" });
+    const set = this.db.prepare("UPDATE files SET taken_at=? WHERE id=? AND path=?");
+    let next = 0;
+    const worker = async () => {
+      while (!this._stop && next < todo.length) {
+        const f = todo[next++];
+        const t0 = Date.now();
+        let t;
+        try {
+          t = await media.captureTime(f.path, f.kind);
+        } catch {
+          pr.done++;
+          continue; // can't be read now (e.g. an unplugged drive): left unknown, tried again on a later run
+        }
+        set.run(t ?? f.mtime * 1000, f.id, f.path);
+        this._measure("date", Date.now() - t0);
+        pr.done++;
+      }
+    };
+    await Promise.all(Array.from({ length: DATE_WORKERS }, worker));
+  }
+
+  /**
+   * Files taken in [after, before) (ms; either may be null), newest first: the results when only a date
+   * range is set. Same shape as rank()'s results.
+   */
+  byDate({ after = null, before = null, kind = "all", limit = 60, offset = 0 } = {}) {
+    const where = ["status='done'", "taken_at IS NOT NULL"];
+    const args = [];
+    if (after != null) { where.push("taken_at >= ?"); args.push(after); }
+    if (before != null) { where.push("taken_at < ?"); args.push(before); }
+    if (kind !== "all") { where.push("kind = ?"); args.push(kind); }
+    // an indexed folder that is missing entirely (e.g. an unplugged drive): its files are left out
+    const offline = this.db.prepare("SELECT path FROM folders").all().map((r) => r.path).filter((p) => !fs.existsSync(p));
+    for (const p of offline) { where.push("folder <> ?"); args.push(p); }
+    const sql = `FROM files WHERE ${where.join(" AND ")}`;
+    const { total } = this.db.prepare(`SELECT COUNT(*) AS total ${sql}`).get(...args);
+    const rows = this.db.prepare(
+      `SELECT id, path, kind, duration, thumb,
+        (SELECT id FROM vectors WHERE file_id=files.id AND modality IN ('image','frame') ORDER BY t LIMIT 1) AS vid
+       ${sql} ORDER BY taken_at DESC LIMIT ? OFFSET ?`,
+    ).all(...args, limit, offset);
+    return {
+      total,
+      results: rows.map((f) => ({
+        id: f.id, path: f.path, name: path.basename(f.path), kind: f.kind, duration: f.duration, thumb: f.thumb,
+        vid: f.vid, moments: [],
+      })),
+    };
+  }
+
   async _enrichNames() {
     const todo = this.db.prepare("SELECT id, path, folder, thumb FROM files WHERE status='done' AND name_done=0").all();
     if (!todo.length) return;
@@ -651,7 +713,7 @@ export class Index {
    * percentOf: turns a score into the relevance % shown to the user; results below minPercent are
    * left out.
    */
-  rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, excludeFiles = null, percentOf = null, minPercent = 0, withIds = false } = {}) {
+  rank(d, scores, { kind = "all", limit = 60, offset = 0, modalities = VISUAL_AUDIO, excludeFile = null, excludeFiles = null, percentOf = null, minPercent = 0, withIds = false, after = null, before = null } = {}) {
     if (!d.n) return { results: [], total: 0 };
     const order = [];
     for (let i = 0; i < d.n; i++) if (modalities.has(d.mod[i])) order.push(i);
@@ -667,13 +729,17 @@ export class Index {
       if (m.moments.length < 6) m.moments.push({ vid: d.vid[i], t: d.t[i], modality: d.mod[i], thumb: d.thumb[i], score: scores[i] });
     }
 
-    const meta = new Map(this.db.prepare("SELECT id, path, kind, duration, thumb, folder FROM files").all().map((r) => [r.id, r]));
+    const meta = new Map(this.db.prepare("SELECT id, path, kind, duration, thumb, folder, taken_at FROM files").all().map((r) => [r.id, r]));
     // an indexed folder that is missing entirely (e.g. an unplugged drive): hide its files, keep them indexed
     const offline = new Set(this.db.prepare("SELECT path FROM folders").all().map((r) => r.path).filter((p) => !fs.existsSync(p)));
     let results = [];
     for (const [fid, m] of best) {
       const f = meta.get(fid);
       if (!f || (kind !== "all" && f.kind !== kind)) continue;
+      // a date range only keeps files whose capture date is known and inside it
+      if (after != null || before != null) {
+        if (f.taken_at == null || (after != null && f.taken_at < after) || (before != null && f.taken_at >= before)) continue;
+      }
       if (offline.has(f.folder)) continue;
       const top = m.moments[0];
       results.push({

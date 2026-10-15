@@ -48,6 +48,14 @@
   <label class="toggle" data-i18n-title="audio.tip">
     <input type="checkbox" id="useAudio" checked> <span data-i18n="audio.label"></span>
   </label>
+  <div class="date-filter" id="dateFilter">
+    <input type="date" id="dateFrom" max="9999-12-31">
+    <span aria-hidden="true">~</span>
+    <input type="date" id="dateTo" max="9999-12-31">
+    <button class="icon-btn date-clear hidden" id="dateClear" type="button" data-i18n-label="date.clear">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
   <div class="status" id="status"></div>
   <button class="icon-btn index-toggle hidden" id="indexToggle" type="button">
     <svg class="play" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>

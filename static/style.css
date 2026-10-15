@@ -103,6 +103,15 @@ input { font: inherit; color: inherit; }
 .seg button { border: 0; background: transparent; padding: 5px 14px; border-radius: 999px; color: var(--muted); }
 .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.1); }
 .toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; cursor: pointer; }
+/* capture-date range: two native date fields, styled like the other controls */
+.date-filter { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
+.date-filter input[type="date"] {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 10px; outline: 0; color-scheme: inherit;
+}
+.date-filter input[type="date"]:hover, .date-filter input[type="date"]:focus { border-color: var(--muted); }
+.date-filter input[type="date"]:invalid, .date-filter input[type="date"]:not(:focus):placeholder-shown { color: var(--muted); }
+.date-clear { width: 26px; height: 26px; }
 .toggle input { accent-color: var(--accent); }
 .select-field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
 /* dropdowns: a button standing in for each <select> (see enhanceSelect in app.js), with an arrow that has

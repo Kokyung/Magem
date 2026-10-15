@@ -104,6 +104,9 @@ export function createServer({ index, staticDir, token, modelName }) {
     limit: Math.min(+(q.get("limit") || 60), 500),
     offset: +(q.get("offset") || 0),
     modalities: q.get("audio") === "0" ? VISUAL : VISUAL_AUDIO,
+    // capture-date range, ms since 1970 (the page turns the chosen local dates into these)
+    after: q.has("after") && Number.isFinite(+q.get("after")) ? +q.get("after") : null,
+    before: q.has("before") && Number.isFinite(+q.get("before")) ? +q.get("before") : null,
   });
 
   /**
@@ -180,6 +183,7 @@ export function createServer({ index, staticDir, token, modelName }) {
           return json(res, await index.browse(q.get("path") || null));
         }
         if (p === "/api/fetch_image") return await proxyImage(res, q.get("url"));
+        if (p === "/api/by_date") return json(res, index.byDate(searchParams(q)));
         if (p === "/api/similar") {
           const vec = index.visualVector(+q.get("vid"));
           if (!vec) return json(res, { error: "not found" }, 404);
