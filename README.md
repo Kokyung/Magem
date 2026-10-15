@@ -9,13 +9,15 @@
 
 <p align="center"><a href="https://github.com/Kokyung/Magem/releases"><b>다운로드(macOS, Windows)</b></a></p>
 
+<p align="center"><b>한국어</b> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a></p>
+
 <p align="center"><img src="assets/mainscreen.png" alt="Magem 메인 화면" width="900"></p>
 
 ## 특징
 
 - 🔒 **완전 오프라인**: AI 모델(Google EmbeddingGemma 2)이 앱 안에 들어 있습니다.
 - 🛡️ **개인 정보 보호**: 사진이 컴퓨터 밖으로 나가지 않고, 계정·서버·클라우드 업로드도 없습니다.
-- 🧠 **파일 이름이 아니라 내용으로 검색**: 사진·동영상의 장면과 동영상 속 소리를 이해해서 찾습니다.
+- 🧠 **파일 이름이 아니라 내용으로 검색**: 사진·동영상의 장면과 동영상 속 음성을 이해해서 찾습니다.
 - ⚡ **설치하면 바로 실행**: Python, Ollama, API 키가 필요 없습니다. GPU가 있으면 자동으로 가속합니다.
 - 🌏 **17개 언어 지원**
 
