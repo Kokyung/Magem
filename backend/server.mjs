@@ -149,10 +149,11 @@ export function createServer({ index, staticDir, token, modelName }) {
           return row ? sendFile(req, res, row.path) : json(res, { error: "not found" }, 404);
         }
         if (p === "/api/prefs") return json(res, index.prefs());
+        if (p === "/api/performance") return json(res, index.performance);
         if (p === "/api/status") {
           return json(res, {
             progress: index.progress, folders: index.folders(), excluded: index.excluded(), stats: index.stats(),
-            lastRun: index.pref("index.lastRun"), eta: index.eta(), paused: index.paused,
+            lastRun: index.pref("index.lastRun"), eta: index.eta(), paused: index.paused, held: index.held,
             model: modelName, engine: embedder.engine,
           });
         }
@@ -222,6 +223,7 @@ export function createServer({ index, staticDir, token, modelName }) {
         }
         if (p === "/api/reindex") return json(res, { started: index.startAuto() }); // coming back to the window
         if (p === "/api/pause") { index.pause(); return json(res, { ok: true }); }
+        if (p === "/api/performance") return json(res, index.setPerformance(body ?? {}));
         if (p === "/api/resume") return json(res, { started: index.resume() });
         if (p === "/api/errors/hide") { // ids: some failed files; none: all of them
           if (body.ids != null && (!Array.isArray(body.ids) || body.ids.length > 10000)) return json(res, { error: "ids: send at most 10,000" }, 400);

@@ -9,6 +9,12 @@ const send = (msg) => (process.parentPort ? process.parentPort.postMessage(msg) 
 
 embedder.init({ modelsDir: MMF_MODELS, cacheDir: path.join(MMF_DATA, "cache") });
 const index = new Index(MMF_DATA);
+// the conditions as the engine starts (later changes come as messages below): set before the first run
+try { index.setConditions(JSON.parse(process.env.MMF_CONDITIONS || "{}")); } catch { /* defaults */ }
+// from the Electron main process: whether the app runs in the background and whether the computer runs on battery
+process.parentPort?.on("message", ({ data }) => {
+  if (data?.type === "conditions") index.setConditions(data);
+});
 const server = createServer({ index, staticDir: path.resolve(MMF_STATIC), token: MMF_TOKEN, modelName: "EmbeddingGemma 2" });
 
 server.listen(0, "127.0.0.1", () => {

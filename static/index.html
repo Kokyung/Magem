@@ -185,6 +185,22 @@
       <p class="muted small setting-note" data-i18n="settings.backgroundNote"></p>
     </div>
     <div class="setting">
+      <span data-i18n="settings.performance"></span>
+      <div class="setting-group" role="radiogroup" aria-labelledby="perfLabel">
+        <p class="small" id="perfLabel" data-i18n="perf.indexing"></p>
+        <label class="setting-check"><input type="radio" name="perfMode" value="eco"> <span data-i18n="perf.eco"></span></label>
+        <label class="setting-check"><input type="radio" name="perfMode" value="balanced" checked> <span data-i18n="perf.balanced"></span></label>
+        <label class="setting-check"><input type="radio" name="perfMode" value="max"> <span data-i18n="perf.max"></span></label>
+      </div>
+      <div class="setting-group" role="radiogroup" aria-labelledby="perfBackgroundLabel">
+        <p class="small" id="perfBackgroundLabel" data-i18n="perf.background"></p>
+        <label class="setting-check"><input type="radio" name="perfBackground" value="eco" checked> <span data-i18n="perf.eco"></span></label>
+        <label class="setting-check"><input type="radio" name="perfBackground" value="balanced"> <span data-i18n="perf.balanced"></span></label>
+        <label class="setting-check"><input type="radio" name="perfBackground" value="max"> <span data-i18n="perf.max"></span></label>
+      </div>
+      <div class="setting-group"><label class="setting-check"><input type="checkbox" id="perfBattery" checked> <span data-i18n="perf.pauseOnBattery"></span></label></div>
+    </div>
+    <div class="setting">
       <span data-i18n="backup.title"></span>
       <div class="row">
         <button class="ghost" id="backupBtn" type="button" data-i18n="backup.backup"></button>

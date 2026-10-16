@@ -16,6 +16,29 @@ let loading = null;
 // inference runs one call at a time; search queries jump ahead of indexing work
 const pending = { high: [], low: [] };
 let busy = false;
+// indexing work waits after the previous call before it runs (the performance setting), leaving the
+// processor (or GPU) idle in between: rest × how long that call took, so the share of idle time is the same
+// on a fast GPU and a slow CPU. Search queries never wait.
+let rest = 0;
+// the last indexing call: a search in between doesn't shorten the rest that follows it
+let lastStart = 0;
+let lastEnd = 0;
+let delayTimer = null;
+let restingSince = null; // indexing work is waiting out a rest
+let rested = 0; // ms indexing work has spent resting, in all
+
+export function setQueueRest(ratio) {
+  rest = ratio;
+  // a rest already under way follows the new ratio (e.g. none at all now)
+  clearTimeout(delayTimer);
+  delayTimer = null;
+  pump();
+}
+
+/** Milliseconds indexing work has spent waiting out rests so far (not working): kept out of its timings. */
+export function restedMs() {
+  return rested + (restingSince != null ? Date.now() - restingSince : 0);
+}
 
 export function candidateDevices() {
   if (process.env.MMF_DEVICE) return [process.env.MMF_DEVICE];
@@ -64,10 +87,11 @@ async function doLoad() {
 
 async function selfTest() {
   const img = new RawImage(new Uint8ClampedArray(64 * 64 * 3).fill(128), 64, 64, 3);
+  // ahead of (and without the rests of) indexing work: a search may be waiting for the model
   const vecs = [
-    ...(await run(() => processor([QUERY_PREFIX + "test"]))),
-    ...(await run(() => processor(null, [[img]]))),
-    ...(await run(() => processor(null, null, [[new Float32Array(16000)]]))),
+    ...(await run(() => processor([QUERY_PREFIX + "test"]), true)),
+    ...(await run(() => processor(null, [[img]]), true)),
+    ...(await run(() => processor(null, null, [[new Float32Array(16000)]]), true)),
   ];
   for (const v of vecs) if (!v.every(Number.isFinite)) throw new Error("self-test produced NaN");
 }
@@ -81,9 +105,26 @@ function run(makeInputs, priority = false) {
 
 async function pump() {
   if (busy) return;
-  const job = pending.high.shift() || pending.low.shift();
+  if (!pending.high.length && pending.low.length && rest > 0) {
+    const wait = lastEnd + (lastEnd - lastStart) * rest - Date.now();
+    if (wait > 0) {
+      restingSince ??= Date.now();
+      delayTimer ??= setTimeout(() => { delayTimer = null; pump(); }, wait);
+      return;
+    }
+  }
+  const search = pending.high.shift();
+  const job = search || pending.low.shift();
   if (!job) return;
+  // a rest is timed afresh once this call is done
+  clearTimeout(delayTimer);
+  delayTimer = null;
+  if (restingSince != null) {
+    rested += Date.now() - restingSince;
+    restingSince = null;
+  }
   busy = true;
+  const started = Date.now();
   try {
     const t = (await model(await job.makeInputs())).sentence_embedding;
     const res = [];
@@ -93,6 +134,10 @@ async function pump() {
     job.reject(e);
   } finally {
     busy = false;
+    if (!search) {
+      lastStart = started;
+      lastEnd = Date.now();
+    }
     pump();
   }
 }

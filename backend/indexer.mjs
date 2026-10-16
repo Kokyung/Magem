@@ -17,14 +17,25 @@ const AUDIO_CHUNK = 15.0;
 const AUDIO_MAX_CHUNKS = 40;
 const AUDIO_MIN_DBFS = -45.0; // quieter chunks are skipped (silence matches everything)
 const EMBED_BATCH = 4;
-const WORKERS = 3;
+const WORKERS = 3; // files in progress at once, at most (see PERFORMANCE)
+// The "indexing performance" setting: how many files are worked on at once, and how long each embedding
+// of indexing work waits after the previous one, as a share of the time that one took (1 = idle half the
+// time), so the computer stays responsive. A second choice
+// applies while the app runs in the background: no window shown (closed to the tray, hidden or minimized).
+const PERFORMANCE = {
+  eco: { workers: 1, rest: 1 },
+  balanced: { workers: 2, rest: 0.25 },
+  max: { workers: WORKERS, rest: 0 },
+};
+const PERFORMANCE_DEFAULT = { mode: "balanced", backgroundMode: "eco", pauseOnBattery: true };
 const NAME_BATCH = 32;
 // during the media pass, new files' names are embedded at least this often (search reloads every 10 s too)
 const NAME_CATCH_UP_MS = 10000;
-// Seconds of work per file (one worker), used for the time-left estimate before a run has measured its own.
-// Videos take far longer than photos, which is why they are counted apart. Replaced by real measurements,
-// which are kept across runs.
-const PACE_GUESS = { image: 1.5, video: 20, name: 0.01, date: 0.02 };
+// Seconds per file at full speed (the files in progress together, their rests left out), used for the
+// time-left estimate before a run has measured its own. Videos take far longer than photos, which is why
+// they are counted apart. Replaced by real measurements, which are kept across runs.
+const PACE_GUESS = { image: 0.5, video: 7, name: 0.01, date: 0.005 };
+const PACE_PREF = "index.throughput"; // "index.pace" held per-worker times, a different measure
 const DATE_WORKERS = 4;
 
 // Generic queries used to estimate how much each vector matches "anything". Because the mean of dot
@@ -141,12 +152,15 @@ export class Index {
     this.progress = { running: false, total: 0, done: 0, current: "", errors: 0, phase: "idle" };
     // text recognition (PaddleOCR) was removed: its entries no longer have anything to answer
     this.db.exec("DELETE FROM vectors WHERE modality='ocr'");
-    const measured = Object.fromEntries(Object.entries(this.pref("index.pace") || {}).filter(([k]) => k in PACE_GUESS));
+    const measured = Object.fromEntries(Object.entries(this.pref(PACE_PREF) || {}).filter(([k]) => k in PACE_GUESS));
     this._pace = { ...PACE_GUESS, ...measured };
     this._paceMeasured = new Set(Object.keys(measured)); // the rest are still guesses
     this._left = { image: 0, video: 0 }; // files of this run still to index
     this._run = {}; // this run's measurements per kind of work: { prior, weight, seconds, count }
     this._eta = null; // the estimate last shown, and when: { at, value }
+    this._conditions = { inBackground: false, onBattery: false }; // told by the Electron main process
+    this._gateWaiters = []; // workers waiting in _gate()
+    this._applyPerformance();
     this._stop = false;
     this._running = null;
     this._newNames = []; // files this run indexed whose names aren't embedded yet: { id, path, folder, thumb }
@@ -231,6 +245,7 @@ export class Index {
        WHERE f.status='done' AND v.modality IN ('image','frame') AND v.thumb IS NOT NULL`,
     ).all().filter((r) => !onDisk.has(r.thumb) && !skipPaths.has(r.path));
     for (const r of missing) {
+      await this._gate(0, () => true);
       if (this._stop) return;
       const dest = this._thumbPath(r.thumb);
       try {
@@ -303,6 +318,7 @@ export class Index {
     }
     this._stop = false;
     this._again = false;
+    this._applyPerformance();
     this._running = this._runIndex().finally(() => {
       this._running = null;
       if (this._again && !this._stop) this.start();
@@ -310,7 +326,59 @@ export class Index {
     return true;
   }
 
-  stop() { this._stop = true; }
+  stop() {
+    this._stop = true;
+    this._wakeGates();
+    embedder.setQueueRest(0); // the file in hand finishes without rests (start() sets them again)
+  }
+
+  /** The performance setting, filled in with the defaults. */
+  get performance() {
+    const p = this.pref("index.performance") || {};
+    return {
+      mode: Object.hasOwn(PERFORMANCE, p.mode) ? p.mode : PERFORMANCE_DEFAULT.mode,
+      backgroundMode: Object.hasOwn(PERFORMANCE, p.backgroundMode) ? p.backgroundMode : PERFORMANCE_DEFAULT.backgroundMode,
+      pauseOnBattery: typeof p.pauseOnBattery === "boolean" ? p.pauseOnBattery : PERFORMANCE_DEFAULT.pauseOnBattery,
+    };
+  }
+  setPerformance({ mode, backgroundMode, pauseOnBattery } = {}) {
+    if (!Object.hasOwn(PERFORMANCE, mode) || !Object.hasOwn(PERFORMANCE, backgroundMode) || typeof pauseOnBattery !== "boolean") {
+      throw badRequest("Invalid performance setting");
+    }
+    this.setPref("index.performance", { mode, backgroundMode, pauseOnBattery });
+    this._applyPerformance();
+    return this.performance;
+  }
+  /** Whether the app runs in the background (no window shown) and whether the computer runs on battery. */
+  setConditions({ inBackground, onBattery }) {
+    this._conditions = { inBackground: inBackground === true, onBattery: onBattery === true };
+    this._applyPerformance();
+  }
+  _applyPerformance() {
+    const perf = this.performance;
+    const profile = PERFORMANCE[this._conditions.inBackground ? perf.backgroundMode : perf.mode];
+    this._workers = profile.workers;
+    this._rest = profile.rest;
+    embedder.setQueueRest(profile.rest);
+    // on battery: a run keeps its place and waits; it goes on once the computer is plugged in
+    this.held = perf.pauseOnBattery && this._conditions.onBattery ? "battery" : null;
+    this._wakeGates();
+  }
+  /** Capture dates take no model time, so at full speed more of them are read at once. */
+  _dateWorkers() {
+    return this._workers >= WORKERS ? DATE_WORKERS : this._workers;
+  }
+  /**
+   * Before each piece of work: wait while held, or while this worker (slot) is beyond limit(). Gives up once
+   * there is nothing left to take (more() false), so a run with fewer workers still ends. Woken whenever
+   * one of these changes (see _wakeGates).
+   */
+  async _gate(slot, more, limit = () => this._workers) {
+    while (!this._stop && more() && (this.held || slot >= limit())) await new Promise((r) => this._gateWaiters.push(r));
+  }
+  _wakeGates() {
+    for (const wake of this._gateWaiters.splice(0)) wake();
+  }
 
   /** Paused by the user: automatic runs (launch, coming back to the window) wait until resume(). */
   get paused() { return this.pref("index.paused") === true; }
@@ -373,6 +441,7 @@ export class Index {
           seen.add(full);
           found.push({ path: full, kind, folder, mtime: st.mtimeMs / 1000, size: st.size });
         }
+        await this._gate(0, () => true); // on battery: the scan waits between folders too
         if (this._stop) return [];
       }
       // drop files that disappeared from disk
@@ -396,7 +465,8 @@ export class Index {
     const pr = this.progress;
     Object.assign(pr, { running: true, phase: "scanning", total: 0, done: 0, errors: 0, current: "" });
     try {
-      const todo = (await this._scan()).filter((it) => this._needsWork(it));
+      await this._gate(0, () => true); // on battery, not even the scan
+      const todo = this._stop ? [] : (await this._scan()).filter((it) => this._needsWork(it));
       // counted now so the estimate covers the indexing still to come during the passes below
       this._left = { image: todo.filter((it) => it.kind === "image").length, video: todo.filter((it) => it.kind === "video").length };
       if (!this._stop) await this._repairThumbs(new Set(todo.map((it) => it.path)));
@@ -408,24 +478,29 @@ export class Index {
       todo.sort((a, b) => (a.kind === b.kind ? a.path.localeCompare(b.path) : a.kind === "image" ? -1 : 1));
       Object.assign(pr, { phase: todo.length ? "loading-model" : "indexing", total: todo.length });
       if (todo.length) {
-        await embedder.load();
+        await this._gate(0, () => true);
+        if (!this._stop) await embedder.load();
         pr.phase = "indexing";
       }
       let next = 0;
       this._newNames = [];
       this._namesAt = Date.now();
-      const worker = async () => {
+      const worker = async (slot) => {
         while (!this._stop && next < todo.length) {
+          await this._gate(slot, () => next < todo.length);
+          if (this._stop || next >= todo.length) break;
           const it = todo[next++];
           const t0 = Date.now();
+          const r0 = embedder.restedMs();
           await this._indexOne(it);
-          this._measure(it.kind, Date.now() - t0);
+          this._measure(it.kind, Date.now() - t0 - (embedder.restedMs() - r0), this._workers);
           this._left[it.kind]--;
           pr.done++;
           this._catchUpNames(); // not awaited: the names wait in the model's queue, not this worker
         }
       };
-      await Promise.all(Array.from({ length: WORKERS }, worker));
+      // a worker done with the list lets the ones waiting at the gate see there is nothing left
+      await Promise.all(Array.from({ length: WORKERS }, (_, slot) => worker(slot).finally(() => this._wakeGates())));
       // also when stopped or paused: what was indexed can then be found by name too
       await this._catchUpNames({ all: true });
       if (!this._stop) await this._enrichNames(); // any whose batch failed above
@@ -441,18 +516,19 @@ export class Index {
       this._eta = null;
       this._dirty = true;
       // the next run's estimate starts from these (only kinds actually measured)
-      this.setPref("index.pace", Object.fromEntries([...this._paceMeasured].map((k) => [k, this._pace[k]])));
+      this.setPref(PACE_PREF, Object.fromEntries([...this._paceMeasured].map((k) => [k, this._pace[k]])));
     }
   }
 
   /**
-   * Seconds per file (per worker) for one kind of work: the average over this whole run, so one unusually
-   * long or short file barely moves it. A pace measured on an earlier run counts as a few files to start
-   * with; a mere guess is dropped at the first measurement.
+   * Seconds per file for one kind of work: how long one took (its rests left out) shared among the files
+   * in progress at the same time, so it holds whatever the performance setting. The average over this
+   * whole run, so one unusually long or short file barely moves it. A pace measured on an earlier run
+   * counts as a few files to start with; a mere guess is dropped at the first measurement.
    */
-  _measure(kind, ms) {
+  _measure(kind, ms, together = 1) {
     const r = (this._run[kind] ??= { prior: this._pace[kind], weight: this._paceMeasured.has(kind) ? 3 : 0, seconds: 0, count: 0 });
-    r.seconds += ms / 1000;
+    r.seconds += Math.max(ms, 0) / 1000 / together;
     r.count++;
     this._pace[kind] = (r.prior * r.weight + r.seconds) / (r.weight + r.count);
     this._paceMeasured.add(kind);
@@ -462,13 +538,20 @@ export class Index {
   eta() {
     const pr = this.progress;
     if (!pr.running || pr.phase === "scanning") return null;
+    if (this.held) {
+      this._eta = null; // starts afresh once it goes on
+      return null;
+    }
     const p = this._pace;
     const left = this._left;
+    const workers = this._workers;
+    // the model's work stretches by the setting's rests (rest 1 = as long again)
+    const slow = 1 + this._rest;
     // photos go first, then videos: the workers split each stretch, but a few videos can't use all of them
-    const indexing = (left.image * p.image) / WORKERS + (left.video ? (left.video * p.video) / Math.min(WORKERS, left.video) : 0);
+    const indexing = (left.image * p.image + (left.video ? (left.video * p.video * workers) / Math.min(workers, left.video) : 0)) * slow;
     const newFiles = left.image + left.video;
-    const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name;
-    const dates = pr.phase === "dates" ? ((pr.total - pr.done) * p.date) / DATE_WORKERS : 0;
+    const names = ((pr.phase === "names" ? pr.total - pr.done : 0) + newFiles) * p.name * slow;
+    const dates = pr.phase === "dates" ? (pr.total - pr.done) * p.date : 0;
     const raw = dates + names + indexing;
     // shown: counts down with the clock and eases toward each new estimate (over ~15 s), so it doesn't jump
     // back and forth as files of different lengths finish
@@ -595,8 +678,10 @@ export class Index {
     Object.assign(pr, { phase: "dates", total: todo.length, done: 0, current: "" });
     const set = this.db.prepare("UPDATE files SET taken_at=? WHERE id=? AND path=?");
     let next = 0;
-    const worker = async () => {
+    const worker = async (slot) => {
       while (!this._stop && next < todo.length) {
+        await this._gate(slot, () => next < todo.length, () => this._dateWorkers());
+        if (this._stop || next >= todo.length) break;
         const f = todo[next++];
         const t0 = Date.now();
         let t;
@@ -607,11 +692,11 @@ export class Index {
           continue; // can't be read now (e.g. an unplugged drive): left unknown, tried again on a later run
         }
         set.run(t ?? f.mtime * 1000, f.id, f.path);
-        this._measure("date", Date.now() - t0);
+        this._measure("date", Date.now() - t0, this._dateWorkers());
         pr.done++;
       }
     };
-    await Promise.all(Array.from({ length: DATE_WORKERS }, worker));
+    await Promise.all(Array.from({ length: DATE_WORKERS }, (_, slot) => worker(slot).finally(() => this._wakeGates())));
   }
 
   /**
@@ -651,6 +736,8 @@ export class Index {
     Object.assign(pr, { phase: "names", total: todo.length, done: 0, current: "" });
     await embedder.load();
     for (let i = 0; i < todo.length && !this._stop; i += NAME_BATCH) {
+      await this._gate(0, () => true);
+      if (this._stop) break;
       const batch = todo.slice(i, i + NAME_BATCH);
       await this._embedNames(batch);
       pr.done += batch.length;
@@ -683,10 +770,12 @@ export class Index {
 
   /** Embed and store the names of these indexed files ({ id, path, folder, thumb }). */
   async _embedNames(files) {
+    await this._gate(0, () => true); // on battery, also the names caught up during the media pass
     const batch = files.map((f) => ({ ...f, ...nameDoc(f.path, f.folder) }));
     const t0 = Date.now();
+    const r0 = embedder.restedMs();
     const vecs = await embedder.embedDocs(batch.map((b) => b.doc));
-    this._measure("name", (Date.now() - t0) / batch.length);
+    this._measure("name", (Date.now() - t0 - (embedder.restedMs() - r0)) / batch.length);
     // a file deleted or re-indexed meanwhile gets nothing (its new row is queued again)
     const ins = this.db.prepare("INSERT INTO vectors (file_id, modality, t, t_end, thumb, vec, text) SELECT ?, 'name', NULL, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM files WHERE id=?)");
     const mark = this.db.prepare("UPDATE files SET name_done=1 WHERE id=?");

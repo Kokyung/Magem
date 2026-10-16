@@ -1273,6 +1273,44 @@ $("backgroundCheck").onchange = (e) => {
 };
 window.mmf?.onOpenSettings?.(() => openDrawer("settings")); // "Settings" in the tray menu
 
+// indexing performance: kept and applied by the engine
+function showPerformance(p) {
+  for (const r of document.querySelectorAll('input[name="perfMode"]')) r.checked = r.value === p.mode;
+  for (const r of document.querySelectorAll('input[name="perfBackground"]')) r.checked = r.value === p.backgroundMode;
+  $("perfBattery").checked = p.pauseOnBattery;
+}
+// saves go one at a time, each sending the form as it is by then, so the last change is the one kept;
+// a load that started before a change doesn't paint over it. Until the saved setting has arrived the
+// controls stay off: a change then would send the placeholder values of the other ones and replace it.
+const perfInputs = document.querySelectorAll('input[name="perfMode"], input[name="perfBackground"], #perfBattery');
+let perfLoaded = false;
+let perfEdits = 0;
+let perfSaving = Promise.resolve();
+for (const el of perfInputs) el.disabled = true;
+async function loadPerformance() {
+  const edits = perfEdits;
+  try {
+    const p = await api("/api/performance");
+    if (edits === perfEdits) showPerformance(p);
+    perfLoaded = true;
+    for (const el of perfInputs) el.disabled = false;
+  } catch { /* tried again when the settings are opened */ }
+}
+function savePerformance() {
+  const edit = ++perfEdits;
+  perfSaving = perfSaving.then(async () => {
+    const mode = document.querySelector('input[name="perfMode"]:checked')?.value;
+    const backgroundMode = document.querySelector('input[name="perfBackground"]:checked')?.value;
+    try { await post("/api/performance", { mode, backgroundMode, pauseOnBattery: $("perfBattery").checked }); }
+    catch (err) {
+      toast(`Couldn't change the performance setting: ${err.message}`);
+      // show what the engine kept, unless a later change is on its way (it sends the whole form anyway)
+      if (edit === perfEdits) loadPerformance();
+    }
+  });
+}
+for (const el of perfInputs) el.onchange = savePerformance;
+
 // ---------- index backup / restore ----------
 // The main process runs the job; this modal shows it until it ends (or is canceled), asking for its state.
 let jobTimer = 0;
@@ -1343,6 +1381,7 @@ window.mmf?.getIndexJob?.().then((job) => { if (job?.state === "running") render
 
 // ---------- drawers, folders & status ----------
 function openDrawer(id) {
+  if (id === "settings" && !perfLoaded) loadPerformance();
   closeDrawers();
   $(id).classList.add("open");
   $(id).setAttribute("aria-hidden", "false");
@@ -1443,7 +1482,8 @@ function renderStatus(s) {
   if (p.running) {
     const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
     const cur = p.current ? p.current.split(/[\\/]/).pop() : "";
-    const main = p.phase === "scanning" ? t("phase.scanning")
+    const main = s.held === "battery" ? t("status.battery")
+      : p.phase === "scanning" ? t("phase.scanning")
       : p.phase === "loading-model" ? t("phase.loadingModel")
       : `${t(p.phase === "names" ? "phase.names" : p.phase === "dates" ? "phase.updating" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
     // the time left for the whole run (file names and indexing together, estimated by the engine), in bold
@@ -1557,6 +1597,7 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   recent = store.get(RECENT_KEY, []).filter((x) => typeof x === "string").slice(0, RECENT_MAX);
   refreshStatus();
   setInterval(refreshStatus, 1500);
+  loadPerformance();
   renderRecent();
   quietFocus = true;
   $("q").focus();

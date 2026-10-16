@@ -369,9 +369,13 @@ main { padding: 8px 24px 60px; }
 .sub-head .ghost { padding: 5px 12px; font-size: 13px; }
 .sub-note { margin: -6px 0 0; }
 .setting { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
-.setting-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+/* only the box and its text take the click, not the empty row after them */
+.setting-check { display: flex; width: fit-content; align-items: center; gap: 8px; cursor: pointer; }
 .setting-check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
 .setting-check input:disabled + span { color: var(--muted); }
+.setting .setting-check { font-weight: 400; }
+.setting-group { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.setting-group p { margin: 0; font-weight: 400; color: var(--text); }
 .setting-note { margin: 6px 0 0 24px; }
 [dir="rtl"] .setting-note { margin: 6px 24px 0 0; }
 .setting-sub { margin: 10px 0 0 24px; }

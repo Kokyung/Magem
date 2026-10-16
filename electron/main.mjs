@@ -101,6 +101,19 @@ function stopBackend() {
   });
 }
 
+/** What the engine's performance setting depends on: running in the background, on battery. */
+function conditions() {
+  return {
+    // no window shown: closed to the tray, hidden or minimized
+    inBackground: !win || win.isDestroyed() || !win.isVisible() || win.isMinimized(),
+    onBattery: powerMonitor.isOnBatteryPower(),
+  };
+}
+function sendConditions() {
+  if (!backend || backendExited) return;
+  backend.postMessage({ type: "conditions", ...conditions() });
+}
+
 function startBackend() {
   const dataDir = app.getPath("userData");
   const logDir = path.join(dataDir, "logs");
@@ -108,7 +121,9 @@ function startBackend() {
   // keep the previous session's engine log next to the new one
   try { fs.renameSync(path.join(logDir, "engine.log"), path.join(logDir, "engine.prev.log")); } catch {}
   const log = fs.createWriteStream(path.join(logDir, "engine.log"), { flags: "w" });
-  const env = { ...process.env, MMF_DATA: dataDir, MMF_MODELS: MODELS_DIR, MMF_STATIC: path.join(APP_ROOT, "static"), MMF_TOKEN: TOKEN };
+  const env = { ...process.env, MMF_DATA: dataDir, MMF_MODELS: MODELS_DIR, MMF_STATIC: path.join(APP_ROOT, "static"), MMF_TOKEN: TOKEN,
+    // from the start, so a launch on battery doesn't begin its first run before hearing about it
+    MMF_CONDITIONS: JSON.stringify(conditions()) };
   delete env.ELECTRON_RUN_AS_NODE;
   // Windows ARM64 builds bundle their own ffmpeg (see scripts/after-pack.cjs)
   const bundledFfmpeg = path.join(process.resourcesPath, "ffmpeg", "ffmpeg.exe");
@@ -127,6 +142,7 @@ function startBackend() {
         clearTimeout(timer);
         log.write(`[engine] listening on 127.0.0.1:${msg.port}\n`);
         resolve(msg.port);
+        sendConditions();
       } else if (msg?.type === "log") {
         log.write(`[engine] ${msg.message}\n`);
       }
@@ -168,7 +184,8 @@ async function createWindow() {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (e, url) => { if (!url.startsWith(baseUrl)) e.preventDefault(); });
-  win.on("closed", () => { win = null; });
+  for (const event of ["show", "hide", "minimize", "restore"]) win.on(event, sendConditions);
+  win.on("closed", () => { win = null; sendConditions(); });
   await win.loadURL(baseUrl + "/" + (process.env.MMF_DEV_QUERY || ""));
   if (!app.isPackaged && process.env.MMF_DEV_CAPTURE) {
     // dev-only: snapshot the window for automated UI checks
@@ -563,6 +580,8 @@ app.whenReady().then(async () => {
     }
   });
   powerMonitor.on("suspend", () => logMain("system sleep"));
+  powerMonitor.on("on-battery", sendConditions);
+  powerMonitor.on("on-ac", sendConditions);
   powerMonitor.on("resume", () => {
     logMain("system wake");
     reviveWindow("wake");
