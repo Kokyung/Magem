@@ -38,6 +38,7 @@
   "build": {
     "appId": "app.kokyung.magem",
     "productName": "Magem",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -93,7 +94,8 @@
     "nsis": {
       "guid": "adffc7f2-4e0f-5696-a2c9-6799ffc43d8d",
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-${version}-${os}.${ext}"
     },
     "linux": {
       "target": [

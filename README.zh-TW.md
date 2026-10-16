@@ -61,9 +61,9 @@
 
 | 平台 | 安裝檔 | 狀態 |
 |---|---|---|
-| macOS（Apple Silicon） | `Magem-<版本>-arm64.dmg` | 已建置並確認可執行 |
-| Windows（x64 / ARM64） | `Magem Setup <版本>.exe` | 已建置並確認可執行 |
-| Linux（x64） | `.AppImage`、`.deb` | 僅有建置設定（需在 Linux 上建置，未驗證） |
+| macOS（Apple Silicon） | `Magem-<版本>-mac-arm64.dmg` | 已建置並確認可執行 |
+| Windows（x64 / ARM64） | `Magem-<版本>-win.exe` | 已建置並確認可執行 |
+| Linux（x64） | `Magem-<版本>-linux-x86_64.AppImage`、`Magem-<版本>-linux-amd64.deb` | 僅有建置設定（需在 Linux 上建置，未驗證） |
 
 - 不支援 Intel Mac，因為 onnxruntime 不提供 Intel Mac 的原生二進位檔。
 - 此建置未使用開發者憑證，而是臨時（ad-hoc）簽署，因此第一次在其他 Mac 上安裝時會出現 Gatekeeper 警告。

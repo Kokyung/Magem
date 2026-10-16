@@ -64,9 +64,9 @@
 
 | Platform | Installer | Status |
 |---|---|---|
-| macOS (Apple Silicon) | `Magem-<version>-arm64.dmg` | Built and tested |
-| Windows (x64 / ARM64) | `Magem Setup <version>.exe` | Built and tested |
-| Linux (x64) | `.AppImage`, `.deb` | Build config only (must be built on Linux, untested) |
+| macOS (Apple Silicon) | `Magem-<version>-mac-arm64.dmg` | Built and tested |
+| Windows (x64 / ARM64) | `Magem-<version>-win.exe` | Built and tested |
+| Linux (x64) | `Magem-<version>-linux-x86_64.AppImage`, `Magem-<version>-linux-amd64.deb` | Build config only (must be built on Linux, untested) |
 
 - Intel Macs aren't supported, because onnxruntime doesn't ship native binaries for Intel Macs.
 - The build is ad-hoc signed without a developer certificate, so Gatekeeper warns the first time it's installed on another Mac.

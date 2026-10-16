@@ -61,9 +61,9 @@
 
 | 플랫폼 | 설치 파일 | 상태 |
 |---|---|---|
-| macOS (Apple Silicon) | `Magem-<버전>-arm64.dmg` | 빌드·실행 확인 완료 |
-| Windows (x64 / ARM64) | `Magem Setup <버전>.exe` | 빌드·실행 확인 완료 |
-| Linux (x64) | `.AppImage`, `.deb` | 빌드 설정만 있음 (Linux에서 빌드 필요, 미검증) |
+| macOS (Apple Silicon) | `Magem-<버전>-mac-arm64.dmg` | 빌드·실행 확인 완료 |
+| Windows (x64 / ARM64) | `Magem-<버전>-win.exe` | 빌드·실행 확인 완료 |
+| Linux (x64) | `Magem-<버전>-linux-x86_64.AppImage`, `Magem-<버전>-linux-amd64.deb` | 빌드 설정만 있음 (Linux에서 빌드 필요, 미검증) |
 
 - Intel Mac은 지원하지 않습니다. onnxruntime이 Intel Mac용 네이티브 바이너리를 제공하지 않기 때문입니다.
 - 개발자 인증서 없이 임시(ad-hoc) 서명한 빌드라서 다른 Mac에 처음 설치하면 Gatekeeper 경고가 뜹니다.
