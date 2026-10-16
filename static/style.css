@@ -43,6 +43,9 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
+/* The page behind the viewer, a drawer or a modal stays put (see lockPageScroll in app.js); the padding
+   takes the place of its scrollbar so the page doesn't shift sideways. */
+html.scroll-lock { overflow: hidden; padding-inline-end: var(--scrollbar-w, 0px); }
 body {
   background: var(--bg); color: var(--text);
   font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", system-ui, sans-serif;
@@ -64,6 +67,10 @@ input { font: inherit; color: inherit; }
 /* macOS: hidden-inset title bar — the header doubles as the window drag area */
 .platform-darwin .top { padding-left: 88px; -webkit-app-region: drag; }
 .platform-darwin .top input, .platform-darwin .top button, .platform-darwin .top label { -webkit-app-region: no-drag; }
+/* That drag region stays live under anything drawn over it: the window still moves by it, so only what takes
+   clicks in an overlay opts out. */
+.platform-darwin :is(.viewer, .drawer, .modal) :is(button, input, select, label, img, video),
+.platform-darwin :is(.dropdown-menu, .context-menu) { -webkit-app-region: no-drag; }
 .brand { user-select: none; display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; }
 .brand img { display: block; }
 .search-wrap { flex: 1; display: flex; align-items: center; gap: 6px; max-width: 806px; margin: 0 auto; min-width: 0; }
@@ -393,8 +400,50 @@ main { padding: 8px 24px 60px; }
 
 /* viewer */
 .viewer { position: fixed; inset: 0; z-index: 40; display: flex; background: rgba(8,8,8,.94); color: #eee; }
-.viewer-media { flex: 1; display: grid; place-items: center; padding: 24px; min-width: 0; }
-.viewer-media img, .viewer-media video { max-width: 100%; max-height: calc(100vh - 48px); border-radius: 8px; background: #000; }
+.viewer-stage { flex: 1; display: flex; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.viewer-media { flex: 1; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 24px; min-width: 0; }
+.viewer-media img { cursor: grab; touch-action: none; user-select: none; }
+.viewer-media > * { grid-area: 1 / 1; } /* the loading sign sits over the picture */
+.viewer-media .loading { visibility: hidden; } /* until it can show whole: never half-drawn */
+.viewer-unreadable { margin: 0; color: #bbb; font-size: 15px; }
+.viewer-media video::-webkit-media-controls-fullscreen-button { display: none; } /* nofullscreen leaves it greyed out */
+/* clicked with the mouse: no keyboard focus ring on the video or its timeline (see afterPointer in app.js) */
+.viewer-stage.pointer-input video:focus-visible,
+.viewer-stage.pointer-input video::-webkit-media-controls-timeline { outline: none; }
+.viewer-media img.dragging { cursor: grabbing; }
+.viewer-zoom { position: absolute; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 999px; background: rgba(22,22,22,.85); border: 1px solid #333; }
+.viewer-zoom .icon-btn { width: 32px; height: 32px; font-size: 18px; color: #ddd; }
+.viewer-zoom .icon-btn:hover { background: #2a2a2a; color: #fff; }
+.viewer-zoom .zoom-level { min-width: 56px; padding: 6px 8px; border: 0; border-radius: 999px; background: none; color: #eee; font-size: 13px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.viewer-zoom .zoom-level:hover { background: #2a2a2a; }
+.viewer-fs { position: absolute; top: 12px; right: 12px; display: grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 10px; background: rgba(22,22,22,.6); color: #ddd; cursor: pointer; }
+.viewer-fs:hover { background: rgba(42,42,42,.9); color: #fff; }
+/* Full screen: only the picture and moving between items; no zoom or pan. */
+.viewer:fullscreen { background: #000; }
+.viewer:fullscreen .viewer-side, .viewer:fullscreen .viewer-zoom { display: none; }
+.viewer.is-video:fullscreen .viewer-step { display: none; } /* a full-screen video stays put: the arrows seek it */
+.viewer:fullscreen .viewer-media { padding: 0; }
+.viewer:fullscreen .viewer-media img, .viewer:fullscreen .viewer-media video { border-radius: 0; }
+.viewer:fullscreen .viewer-media img { cursor: default; }
+.viewer-fs, .viewer-step, .viewer-zoom { transition: opacity .3s; }
+.viewer.idle :is(.viewer-fs, .viewer-step, .viewer-zoom) { opacity: 0; pointer-events: none; }
+.viewer-step { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 64px; border: 0; border-radius: 10px; background: rgba(22,22,22,.6); color: #ddd; font-size: 32px; line-height: 1; cursor: pointer; }
+.viewer-step:hover { background: rgba(42,42,42,.9); color: #fff; }
+.viewer-step.prev { left: 12px; }
+.viewer-step.next { right: 12px; }
+/* The play / pause sign over a video clicked to play or pause it. */
+/* The loading sign and the play / pause sign are the same dark disc, centred where the video player draws
+   its own 72px spinner (12px above the middle), so a video stalling mid-play shows ours over it. */
+.viewer-loader, .viewer-flash { display: grid; place-items: center; width: 76px; height: 76px; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; pointer-events: none; }
+.viewer-loader { translate: 0 -12px; background: #141414; } /* opaque: the player's spinner mustn't show through */
+.viewer-loader::after { content: ""; width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255,255,255,.25); border-top-color: #fff; animation: spin .9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .viewer-loader::after { animation-duration: 3s; } }
+.viewer-flash { position: absolute; left: 50%; top: 50%; translate: -50% calc(-50% - 12px); opacity: 0; }
+.viewer-flash.show { animation: viewer-flash .8s ease-out; }
+.viewer-flash:not(.paused) .flash-pause, .viewer-flash.paused .flash-play { display: none; }
+@keyframes viewer-flash { 0% { opacity: 0; scale: .8; } 25% { opacity: 1; scale: 1; } 60% { opacity: 1; } 100% { opacity: 0; scale: 1.1; } }
+.viewer-toast { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 8px 16px; border-radius: 999px; background: rgba(22,22,22,.9); border: 1px solid #333; color: #eee; font-size: 14px; pointer-events: none; white-space: nowrap; }
+.viewer-media img, .viewer-media video { max-width: 100%; max-height: 100%; border-radius: 8px; background: #000; }
 .viewer-media .fallback { text-align: center; color: #bbb; }
 .viewer-side { width: 320px; flex: none; background: #161616; padding: 24px; display: flex; flex-direction: column; gap: 12px; overflow: auto; position: relative; }
 .viewer-side h3 { margin: 24px 0 0; font-size: 16px; word-break: break-all; }
@@ -420,6 +469,10 @@ main { padding: 8px 24px 60px; }
 .dropzone { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
 .dropzone div { background: var(--surface); padding: 22px 32px; border-radius: 16px; border: 2px dashed var(--accent); font-weight: 600; box-shadow: var(--shadow); }
 .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 60; background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 999px; font-size: 14px; box-shadow: var(--shadow); }
+/* Toasts rise in from below, then rise on out (see showToast in app.js). */
+.toast, .viewer-toast { opacity: 0; translate: 0 12px; pointer-events: none; transition: opacity .25s, translate .25s; }
+.toast.show, .viewer-toast.show { opacity: 1; translate: 0 0; }
+.toast.leaving, .viewer-toast.leaving { opacity: 0; translate: 0 -12px; }
 
 @media (max-width: 720px) {
   .top { flex-wrap: wrap; padding: 12px 16px; gap: 10px; }
@@ -430,5 +483,6 @@ main { padding: 8px 24px 60px; }
   .progress { margin: 0 16px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
   .viewer { flex-direction: column; }
-  .viewer-side { width: auto; }
+  .viewer-side { width: auto; flex: 0 1 auto; min-height: 0; } /* scrolls instead of squeezing the picture */
+  .viewer-stage { min-height: 50vh; }
 }

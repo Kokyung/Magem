@@ -47,12 +47,20 @@ async function api(path, opts = {}) {
 }
 const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 
-function toast(msg, ms = 2600) {
-  const t = $("toast");
-  t.textContent = msg;
-  t.classList.remove("hidden");
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.add("hidden"), ms);
+function toast(msg, ms = 2600) { showToast($("toast"), msg, ms); }
+/** Fades a toast element in; after `ms` it fades out (both moving up, in CSS). */
+function showToast(el, msg, ms) {
+  el.textContent = msg;
+  clearTimeout(el._t);
+  el.classList.remove("leaving");
+  el.classList.add("show");
+  el._t = setTimeout(() => hideToast(el), ms);
+}
+function hideToast(el) {
+  clearTimeout(el._t);
+  if (!el.classList.contains("show")) return;
+  el.classList.replace("show", "leaving");
+  el._t = setTimeout(() => el.classList.remove("leaving"), 250); // back below, unseen, for the next one
 }
 
 const fmtTime = (s) => {
@@ -520,7 +528,9 @@ function openViewer(list, i) {
   const r = list.results[i];
   if (!r) return;
   state.viewer = { list, index: i };
+  if ($("viewer").classList.contains("hidden")) wakeViewerControls(); // shown on opening, then they fade
   $("viewer").classList.remove("hidden");
+  $("viewer").classList.toggle("is-video", r.kind === "video");
   $("vName").textContent = r.name;
   $("vPath").textContent = r.path;
   $("vScore").innerHTML = r.percent == null ? ""
@@ -531,22 +541,67 @@ function openViewer(list, i) {
 
   const media = $("viewerMedia");
   media.innerHTML = "";
+  hideViewerToast();
+  // The picture or video stays hidden behind a loading sign until it can show whole (decoded, or the
+  // video's first frame), so it never draws in. A file the engine can't read at all says so instead.
+  const loader = document.createElement("div");
+  loader.className = "viewer-loader";
+  const shown = (el) => { el.classList.remove("loading"); loader.remove(); };
+  const unreadable = (el) => {
+    if (el.isConnected) media.innerHTML = `<p class="viewer-unreadable">${esc(t("viewer.unreadable"))}</p>`;
+  };
   if (r.kind === "image") {
     const img = new Image();
+    img.draggable = false; // a left-button drag pans the picture
+    img.className = "loading";
+    img.onload = () => img.decode().catch(() => {}).then(() => shown(img));
+    let fellBack = false;
+    img.onerror = async () => {
+      if (fellBack || !(await fileReadable(r.id))) return unreadable(img);
+      fellBack = true;
+      img.src = `/thumb/${r.thumb}`; // readable but not by the browser (e.g. HEIC): its thumbnail
+    };
     img.src = `/media/${r.id}`;
-    img.onerror = () => { img.src = `/thumb/${r.thumb}`; }; // e.g. HEIC in browsers without support
-    media.appendChild(img);
+    media.append(img, loader);
+    resetZoom(img);
   } else {
+    resetZoom(null);
     const v = document.createElement("video");
     v.src = `/media/${r.id}#t=${Math.max(0, (r.t || 0) - 0.5)}`;
-    v.controls = true;
-    v.autoplay = true;
-    v.onerror = () => {
-      media.innerHTML = `<div class="fallback"><img src="/thumb/${esc(r.thumb)}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
+    // The player's controls come on with the first frame: on while loading, its own spinner starts, and
+    // (autoplay off) stays up to ~1.3 s past it, finishing its animation, over the shown video.
+    v.controls = false;
+    v.controlsList.add("nofullscreen"); // the viewer's own full screen button covers videos too
+    // no ⋮ menu: with nothing left in it (download, speed, picture-in-picture) the player drops the button
+    v.controlsList.add("nodownload", "noplaybackrate");
+    v.disablePictureInPicture = true;
+    // a click on the picture plays / pauses (clicks on the player's own controls don't arrive here)
+    v.addEventListener("click", () => {
+      const play = v.paused;
+      if (play) v.play().catch(() => {}); else v.pause();
+      flashPlayState(play);
+    });
+    v.autoplay = store.get("mmf.videoAutoplay", true) !== false;
+    // Chromium's player with the default preload ("metadata") and no autoplay can leave its own loading
+    // spinner stuck on over the paused video; buffering fully (a local file) never does.
+    v.preload = "auto";
+    v.className = "loading";
+    v.addEventListener("loadeddata", () => { v.controls = true; shown(v); }, { once: true });
+    // stalling mid-play or seeking: our sign again, over the player's own spinner
+    const loading = () => { if (v.isConnected) media.append(loader); };
+    v.addEventListener("waiting", loading);
+    v.addEventListener("seeking", loading);
+    // (not while the video is still hidden: opening at a moment seeks before its first frame shows)
+    const loaded = () => { if (!v.classList.contains("loading")) loader.remove(); };
+    for (const ev of ["playing", "canplay", "seeked"]) v.addEventListener(ev, loaded);
+    v.onerror = async () => {
+      if (!(await fileReadable(r.id))) return unreadable(v);
+      if (v.isConnected) media.innerHTML = `<div class="fallback"><img src="/thumb/${esc(r.thumb)}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
     };
-    media.appendChild(v);
+    media.append(v, loader);
   }
 
+  $("vFlash").classList.remove("show");
   const mom = $("vMoments");
   mom.innerHTML = "";
   if (r.kind === "video" && r.moments?.length) {
@@ -570,9 +625,31 @@ function openViewer(list, i) {
   }
 }
 
+/** Whether the engine can read the file at all: missing or unreadable, or only a format the browser can't show. */
+async function fileReadable(id) {
+  try {
+    const res = await fetch(`/media/${id}`, { headers: { Range: "bytes=0-0" } });
+    await res.arrayBuffer(); // a read error mid-way drops the connection
+    return res.ok;
+  } catch { return false; }
+}
+
+/** The play or pause sign fades in and out over the middle of the picture. */
+function flashPlayState(playing) {
+  const el = $("vFlash");
+  el.classList.toggle("paused", !playing);
+  el.classList.remove("show");
+  void el.offsetWidth; // restart the animation on a quick second click
+  el.classList.add("show");
+}
+
 function closeViewer() {
+  if (isViewerFullscreen()) document.exitFullscreen().catch(() => {});
   $("viewer").classList.add("hidden");
   $("viewerMedia").innerHTML = "";
+  resetZoom(null);
+  hideViewerToast();
+  clearTimeout(wakeViewerControls._t);
   state.viewer = { list: null, index: -1 };
 }
 const viewerResult = () => state.viewer.list?.results[state.viewer.index];
@@ -604,6 +681,139 @@ function searchSimilar(r) {
   window.scrollTo({ top: 0 });
 }
 
+/** A short note over the bottom of the picture, e.g. "This is the first image." */
+function viewerToast(msg) { showToast($("vToast"), msg, 1600); }
+function hideViewerToast() { hideToast($("vToast")); }
+
+// ---------- viewer zoom & pan (pictures only: a video's own controls take the clicks) ----------
+// 100% is the picture fitted to the window, as it first shows.
+const ZOOM_MIN = 10, ZOOM_MAX = 1000;
+const zoom = { img: null, pct: 100, x: 0, y: 0, drag: null };
+function applyZoom() {
+  if (zoom.img) zoom.img.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.pct / 100})`;
+  $("vZoomReset").textContent = `${Math.round(zoom.pct)}%`;
+}
+function resetZoom(img) {
+  Object.assign(zoom, { img, pct: 100, x: 0, y: 0, drag: null });
+  $("vZoom").classList.toggle("hidden", !img); // full screen hides it in CSS
+  applyZoom();
+}
+/** Zoom to `pct`, keeping what's at the centre of the picture area where it is (wherever the picture was moved). */
+function setZoom(pct) {
+  if (!zoom.img) return;
+  pct = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pct));
+  const box = $("viewerMedia").getBoundingClientRect();
+  const r = zoom.img.getBoundingClientRect();
+  const k = pct / zoom.pct;
+  zoom.x -= (box.left + box.width / 2 - (r.left + r.width / 2)) * (k - 1);
+  zoom.y -= (box.top + box.height / 2 - (r.top + r.height / 2)) * (k - 1);
+  zoom.pct = pct;
+  applyZoom();
+  wakeViewerControls(); // the zoom buttons show the new level
+}
+// Steps multiply rather than add, so each one feels the same at any size (+5 points at 800% is barely visible).
+const zoomBy = (factor) => setZoom(zoom.pct * factor);
+$("vZoomIn").onclick = () => zoomBy(1.05);
+$("vZoomOut").onclick = () => zoomBy(1 / 1.05);
+$("vZoomReset").onclick = () => { resetZoom(zoom.img); wakeViewerControls(); };
+
+// A Mac trackpad's two-finger drag also arrives as wheel events: those pan, a mouse wheel zooms.
+// Chromium gives no "device" field; a precise (trackpad) scroll has wheelDeltaY = -3 × deltaY, a wheel notch doesn't.
+const isTrackpadScroll = (e) => window.mmf?.platform === "darwin"
+  && (e.deltaX !== 0 || (e.wheelDeltaY !== 0 && Math.abs(e.wheelDeltaY + 3 * e.deltaY) < 1));
+// A wheel notch: ×1.1. A trackpad pinch (ctrlKey) sends many small events, so ×1.01 each.
+$("viewerMedia").addEventListener("wheel", (e) => {
+  if (!zoom.img || isViewerFullscreen()) return;
+  e.preventDefault();
+  if (!e.ctrlKey && isTrackpadScroll(e)) { // ctrlKey: a trackpad pinch, which zooms
+    zoom.x -= e.deltaX;
+    zoom.y -= e.deltaY;
+    applyZoom();
+  } else if (e.deltaY) {
+    const factor = e.ctrlKey ? 1.01 : 1.1;
+    zoomBy(e.deltaY < 0 ? factor : 1 / factor);
+  }
+}, { passive: false });
+
+$("viewerMedia").addEventListener("pointerdown", (e) => {
+  if (e.button !== 0 || !zoom.img || e.target !== zoom.img || isViewerFullscreen()) return;
+  zoom.drag = { id: e.pointerId, x: e.clientX - zoom.x, y: e.clientY - zoom.y };
+  zoom.img.setPointerCapture(e.pointerId);
+  zoom.img.classList.add("dragging");
+});
+$("viewerMedia").addEventListener("pointermove", (e) => {
+  if (zoom.drag?.id !== e.pointerId) return;
+  zoom.x = e.clientX - zoom.drag.x;
+  zoom.y = e.clientY - zoom.drag.y;
+  applyZoom();
+});
+const endDrag = (e) => {
+  if (zoom.drag?.id !== e.pointerId) return;
+  zoom.drag = null;
+  zoom.img?.classList.remove("dragging");
+};
+$("viewerMedia").addEventListener("pointerup", endDrag);
+$("viewerMedia").addEventListener("pointercancel", endDrag);
+
+// ---------- viewer full screen ----------
+const isViewerFullscreen = () => document.fullscreenElement === $("viewer");
+$("vFullscreen").onclick = () => {
+  if (isViewerFullscreen()) document.exitFullscreen().catch(() => {});
+  else $("viewer").requestFullscreen().catch((e) => toast(`Can't go full screen: ${e.message}`));
+};
+// The ‹ ›, full-screen and zoom buttons fade out while the mouse rests (or is over the side panel), and come
+// back when it moves over the picture or the picture zooms.
+const IDLE_MS = 2000;
+function wakeViewerControls() {
+  clearTimeout(wakeViewerControls._t);
+  $("viewer").classList.remove("idle");
+  wakeViewerControls._t = setTimeout(() => {
+    // not while the mouse is on them or the keyboard is on one (:focus-visible: a mouse click focuses them too)
+    const inUse = ".viewer-fs:hover, .viewer-step:hover, .viewer-zoom:hover, .viewer-stage :focus-visible";
+    if (!$("viewer").querySelector(inUse)) $("viewer").classList.add("idle");
+  }, IDLE_MS);
+}
+document.querySelector(".viewer-stage").addEventListener("mousemove", wakeViewerControls);
+// A click leaves focus on what it hit, and an arrow key then draws the keyboard focus ring on it. Our
+// buttons give focus back (Space shouldn't press them again); the video keeps it for its own keys (Space,
+// volume), with the ring hidden in CSS until Tab is used. The player's timeline keeps its pointer events
+// to itself; letting go of it ends its pointer capture instead.
+const stage = document.querySelector(".viewer-stage");
+const afterPointer = () => {
+  stage.classList.add("pointer-input");
+  setTimeout(() => {
+    const a = document.activeElement;
+    if (stage.contains(a) && a.tagName !== "VIDEO") a.blur();
+  });
+};
+for (const type of ["pointerup", "lostpointercapture"]) stage.addEventListener(type, afterPointer, true);
+document.addEventListener("keydown", (e) => { if (e.key === "Tab") stage.classList.remove("pointer-input"); });
+document.querySelector(".viewer-stage").addEventListener("focusin", (e) => { if (e.target.matches(":focus-visible")) wakeViewerControls(); });
+
+// Entering or leaving (button, Esc, the OS): the picture back at its fitted size, the button's label to match.
+document.addEventListener("fullscreenchange", () => {
+  wakeViewerControls();
+  if (zoom.img) resetZoom(zoom.img);
+  $("vFullscreen").title = t(isViewerFullscreen() ? "viewer.exitFullscreen" : "viewer.fullscreen");
+  // full screen shows only #viewer: the right-click menu and toasts move into it meanwhile
+  (isViewerFullscreen() ? $("viewer") : document.body).append($("contextMenu"), $("toast"));
+});
+
+const SEEK_STEP = 5; // seconds per arrow key in a full-screen video
+
+/** The previous (-1) or next (+1) item, from the arrow keys or the ‹ › buttons. */
+function stepViewer(dir) {
+  const { list, index } = state.viewer;
+  if (!list) return;
+  const next = index + dir;
+  // past either end, stay put: reopening the same item would restart its video
+  if (next < 0) viewerToast(t("viewer.first"));
+  else if (next >= list.results.length) viewerToast(t("viewer.last"));
+  else openViewer(list, next);
+}
+$("vPrev").onclick = () => stepViewer(-1);
+$("vNext").onclick = () => stepViewer(1);
+
 $("viewerMedia").oncontextmenu = (e) => {
   const r = viewerResult();
   if (!r) return;
@@ -619,7 +829,7 @@ document.addEventListener("keydown", (e) => {
   }
   // any key dismisses an open menu (it acts on the file it was opened for, which arrows would change)
   if (menuOpen()) { closeMenu(); if (e.key === "Escape") return; }
-  const { list, index } = state.viewer;
+  const { list } = state.viewer;
   if (!list) {
     if (e.key === "Escape") {
       if (selection.ids.size) clearSelection();
@@ -627,10 +837,34 @@ document.addEventListener("keydown", (e) => {
     }
     return;
   }
-  if (e.key === "Escape") closeViewer();
-  if (e.key === "ArrowRight") openViewer(list, Math.min(index + 1, list.results.length - 1));
-  if (e.key === "ArrowLeft") openViewer(list, Math.max(index - 1, 0));
+  if (e.key === "Escape") {
+    // Esc in full screen only leaves full screen
+    if (isViewerFullscreen()) document.exitFullscreen().catch(() => {});
+    else closeViewer();
+  }
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    e.preventDefault(); // not the focused video's own seek
+    const video = $("viewerMedia").querySelector("video");
+    // a video in full screen: the arrows move along its timeline instead of to another item
+    if (video && isViewerFullscreen()) video.currentTime += e.key === "ArrowRight" ? SEEK_STEP : -SEEK_STEP;
+    else stepViewer(e.key === "ArrowRight" ? 1 : -1);
+  }
 });
+
+// ---------- page scroll lock ----------
+// While the viewer, a drawer or the backup modal is open, the page behind it doesn't scroll. The page's
+// scrollbar width is measured before it goes away (the observer runs before the next paint).
+const overlays = [$("viewer"), $("jobModal"), ...document.querySelectorAll(".drawer")];
+const overlayOpen = (el) => (el.classList.contains("drawer") ? el.classList.contains("open") : !el.classList.contains("hidden"));
+function lockPageScroll() {
+  const root = document.documentElement;
+  const lock = overlays.some(overlayOpen);
+  if (lock === root.classList.contains("scroll-lock")) return;
+  if (lock) root.style.setProperty("--scrollbar-w", `${window.innerWidth - root.clientWidth}px`);
+  root.classList.toggle("scroll-lock", lock);
+}
+const overlayObserver = new MutationObserver(lockPageScroll);
+for (const el of overlays) overlayObserver.observe(el, { attributes: true, attributeFilter: ["class"] });
 
 // ---------- results deleted outside the app ----------
 // Coming back to the window, list again: the engine drops files deleted meanwhile from what it returns.
@@ -1267,6 +1501,7 @@ async function setLoginItem(on) {
 $("startupCheck").onchange = (e) => setLoginItem(e.target.checked);
 $("startHiddenCheck").onchange = () => setLoginItem(true);
 loadAppSettings();
+$("autoplayCheck").onchange = (e) => store.set("mmf.videoAutoplay", e.target.checked);
 $("backgroundCheck").onchange = (e) => {
   store.set("mmf.background", e.target.checked);
   window.mmf.setRunInBackground(e.target.checked);
@@ -1591,6 +1826,7 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   prefsLoaded = true;
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
+  $("autoplayCheck").checked = store.get("mmf.videoAutoplay", true) !== false;
   readBrowseSort();
   syncDropdowns();
   browse.path = store.get("mmf.browse", null);

@@ -166,6 +166,9 @@
         <option value="dark" data-i18n="theme.dark"></option>
       </select>
     </label>
+    <label class="setting-check">
+      <input type="checkbox" id="autoplayCheck" checked> <span data-i18n="settings.videoAutoplay"></span>
+    </label>
     <div class="hidden" id="startupRow">
       <label class="setting-check">
         <input type="checkbox" id="startupCheck"> <span data-i18n="settings.startup"></span>
@@ -213,7 +216,24 @@
 <div class="scrim" id="scrim"></div>
 
 <div class="viewer hidden" id="viewer" role="dialog" aria-modal="true">
-  <div class="viewer-media" id="viewerMedia"></div>
+  <div class="viewer-stage">
+    <div class="viewer-media" id="viewerMedia"></div>
+    <div class="viewer-zoom hidden" id="vZoom">
+      <button class="icon-btn" id="vZoomOut" type="button" data-i18n-title="viewer.zoomOut">−</button>
+      <button class="zoom-level" id="vZoomReset" type="button" data-i18n-title="viewer.zoomReset">100%</button>
+      <button class="icon-btn" id="vZoomIn" type="button" data-i18n-title="viewer.zoomIn">+</button>
+    </div>
+    <button class="viewer-fs" id="vFullscreen" type="button" data-i18n-title="viewer.fullscreen">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
+    </button>
+    <button class="viewer-step prev" id="vPrev" type="button" data-i18n-title="viewer.prev">‹</button>
+    <button class="viewer-step next" id="vNext" type="button" data-i18n-title="viewer.next">›</button>
+    <div class="viewer-flash" id="vFlash" aria-hidden="true">
+      <svg class="flash-play" viewBox="0 0 24 24" width="34" height="34" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+      <svg class="flash-pause" viewBox="0 0 24 24" width="34" height="34" fill="currentColor"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+    </div>
+    <div class="viewer-toast" id="vToast"></div>
+  </div>
   <div class="viewer-side">
     <button class="icon-btn close" id="closeViewer" data-i18n-title="viewer.closeEsc">×</button>
     <h3 id="vName"></h3>
@@ -231,7 +251,7 @@
 </div>
 
 <div class="dropzone hidden" id="dropzone"><div data-i18n="dropzone"></div></div>
-<div class="toast hidden" id="toast"></div>
+<div class="toast" id="toast"></div>
 <div class="context-menu hidden" id="contextMenu" role="menu"></div>
 <div class="modal hidden" id="jobModal" role="dialog" aria-modal="true" aria-labelledby="jobTitle">
   <div class="modal-card">
