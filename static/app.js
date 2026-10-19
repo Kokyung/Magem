@@ -31,7 +31,7 @@ const state = {
   type: "all", audio: true, query: "", imageBlob: null, similarVid: null, similarExclude: null,
   lists: {},            // "main"; a text search also has "name" (file & folder names, shown above it)
   expanded: false,      // user paged a list: don't auto-refresh under them
-  seq: 0, hasIndex: false, progress: null,
+  seq: 0, hasIndex: false, hasFolders: false, progress: null,
   viewer: { list: null, index: -1 },
   searching: 0,         // seq of an image search still waiting for its first page (shows placeholders)
   after: null, before: null, // capture-date range (ms), from the date filter
@@ -48,11 +48,19 @@ async function api(path, opts = {}) {
 const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 
 function toast(msg, ms = 2600) { showToast($("toast"), msg, ms); }
-/** Fades a toast element in; after `ms` it fades out (both moving up, in CSS). */
+const TOAST_FADE_MS = 250; // the transition in CSS
+/**
+ * Fades a toast element in; after `ms` it fades out (both moving up, in CSS). A different message over a
+ * showing one waits for that one to fade out, so every message fades in; the same one just stays longer.
+ */
 function showToast(el, msg, ms) {
-  el.textContent = msg;
   clearTimeout(el._t);
-  el.classList.remove("leaving");
+  if (el.classList.contains("show") && el.textContent !== msg) hideToast(el);
+  if (el.classList.contains("leaving")) {
+    el._t = setTimeout(() => { settleToast(el); showToast(el, msg, ms); }, TOAST_FADE_MS);
+    return;
+  }
+  el.textContent = msg;
   el.classList.add("show");
   el._t = setTimeout(() => hideToast(el), ms);
 }
@@ -60,7 +68,14 @@ function hideToast(el) {
   clearTimeout(el._t);
   if (!el.classList.contains("show")) return;
   el.classList.replace("show", "leaving");
-  el._t = setTimeout(() => el.classList.remove("leaving"), 250); // back below, unseen, for the next one
+  el._t = setTimeout(() => settleToast(el), TOAST_FADE_MS);
+}
+/** Back below at once, unseen, so the next message rises from there too. */
+function settleToast(el) {
+  el.style.transition = "none";
+  el.classList.remove("leaving");
+  void el.offsetWidth;
+  el.style.transition = "";
 }
 
 const fmtTime = (s) => {
@@ -533,9 +548,11 @@ function openViewer(list, i) {
   $("viewer").classList.toggle("is-video", r.kind === "video");
   $("vName").textContent = r.name;
   $("vPath").textContent = r.path;
-  $("vScore").innerHTML = r.percent == null ? ""
+  $("vScore").innerHTML = r.indexed === false ? `<span class="muted">${esc(t(r.failed ? "browser.failed" : "browser.pending"))}</span>`
+    : r.percent == null ? ""
     : `<span class="muted">${esc(t("viewer.relevance"))}</span> ${r.percent}% · <span class="muted">${esc(t("viewer.foundBy", { via: t(VIA_KEY[r.via] || "via.scene") }))}</span>`;
   $("vSimilar").disabled = r.vid == null;
+  $("vReveal").disabled = $("vOpen").disabled = r.id == null; // not indexed yet: the main process opens files by id
   $("vText").classList.toggle("hidden", !r.text);
   $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t("viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
 
@@ -557,17 +574,17 @@ function openViewer(list, i) {
     img.onload = () => img.decode().catch(() => {}).then(() => shown(img));
     let fellBack = false;
     img.onerror = async () => {
-      if (fellBack || !(await fileReadable(r.id))) return unreadable(img);
+      if (fellBack || !r.thumb || !(await fileReadable(r))) return unreadable(img);
       fellBack = true;
       img.src = `/thumb/${r.thumb}`; // readable but not by the browser (e.g. HEIC): its thumbnail
     };
-    img.src = `/media/${r.id}`;
+    img.src = mediaUrl(r);
     media.append(img, loader);
     resetZoom(img);
   } else {
     resetZoom(null);
     const v = document.createElement("video");
-    v.src = `/media/${r.id}#t=${Math.max(0, (r.t || 0) - 0.5)}`;
+    v.src = `${mediaUrl(r)}#t=${Math.max(0, (r.t || 0) - 0.5)}`;
     // The player's controls come on with the first frame: on while loading, its own spinner starts, and
     // (autoplay off) stays up to ~1.3 s past it, finishing its animation, over the shown video.
     v.controls = false;
@@ -595,7 +612,7 @@ function openViewer(list, i) {
     const loaded = () => { if (!v.classList.contains("loading")) loader.remove(); };
     for (const ev of ["playing", "canplay", "seeked"]) v.addEventListener(ev, loaded);
     v.onerror = async () => {
-      if (!(await fileReadable(r.id))) return unreadable(v);
+      if (!r.thumb || !(await fileReadable(r))) return unreadable(v);
       if (v.isConnected) media.innerHTML = `<div class="fallback"><img src="/thumb/${esc(r.thumb)}" alt=""><p>This format can't be played here.<br>Use “${esc(t("viewer.open"))}”.</p></div>`;
     };
     media.append(v, loader);
@@ -625,10 +642,13 @@ function openViewer(list, i) {
   }
 }
 
+/** The file itself; one in the folder browser that isn't indexed yet has no id, only its path. */
+const mediaUrl = (r) => (r.id == null ? `/media_path?path=${encodeURIComponent(r.path)}` : `/media/${r.id}`);
+
 /** Whether the engine can read the file at all: missing or unreadable, or only a format the browser can't show. */
-async function fileReadable(id) {
+async function fileReadable(r) {
   try {
-    const res = await fetch(`/media/${id}`, { headers: { Range: "bytes=0-0" } });
+    const res = await fetch(mediaUrl(r), { headers: { Range: "bytes=0-0" } });
     await res.arrayBuffer(); // a read error mid-way drops the connection
     return res.ok;
   } catch { return false; }
@@ -651,6 +671,7 @@ function closeViewer() {
   hideViewerToast();
   clearTimeout(wakeViewerControls._t);
   state.viewer = { list: null, index: -1 };
+  if (browse.stale && !isActive()) loadBrowse(); // indexing moved on while it was open
 }
 const viewerResult = () => state.viewer.list?.results[state.viewer.index];
 
@@ -799,8 +820,6 @@ document.addEventListener("fullscreenchange", () => {
   (isViewerFullscreen() ? $("viewer") : document.body).append($("contextMenu"), $("toast"));
 });
 
-const SEEK_STEP = 5; // seconds per arrow key in a full-screen video
-
 /** The previous (-1) or next (+1) item, from the arrow keys or the ‹ › buttons. */
 function stepViewer(dir) {
   const { list, index } = state.viewer;
@@ -816,12 +835,17 @@ $("vNext").onclick = () => stepViewer(1);
 
 $("viewerMedia").oncontextmenu = (e) => {
   const r = viewerResult();
-  if (!r) return;
+  if (!r || r.id == null) return; // its actions all need an indexed file
   e.preventDefault();
   singleFileMenu(e, r);
 };
 
 document.addEventListener("keydown", (e) => {
+  // a confirm dialog owns the keyboard: Esc answers no, Enter presses the focused button
+  if (!$("confirmModal").classList.contains("hidden")) {
+    if (e.key === "Escape") closeConfirm(false);
+    return;
+  }
   // the backup modal owns the keyboard while it is open: Esc closes it once the job is over
   if (!$("jobModal").classList.contains("hidden")) {
     if (e.key === "Escape") closeIndexJob();
@@ -844,17 +868,14 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
     e.preventDefault(); // not the focused video's own seek
-    const video = $("viewerMedia").querySelector("video");
-    // a video in full screen: the arrows move along its timeline instead of to another item
-    if (video && isViewerFullscreen()) video.currentTime += e.key === "ArrowRight" ? SEEK_STEP : -SEEK_STEP;
-    else stepViewer(e.key === "ArrowRight" ? 1 : -1);
+    stepViewer(e.key === "ArrowRight" ? 1 : -1);
   }
 });
 
 // ---------- page scroll lock ----------
 // While the viewer, a drawer or the backup modal is open, the page behind it doesn't scroll. The page's
 // scrollbar width is measured before it goes away (the observer runs before the next paint).
-const overlays = [$("viewer"), $("jobModal"), ...document.querySelectorAll(".drawer")];
+const overlays = [$("viewer"), $("jobModal"), $("confirmModal"), ...document.querySelectorAll(".drawer")];
 const overlayOpen = (el) => (el.classList.contains("drawer") ? el.classList.contains("open") : !el.classList.contains("hidden"));
 function lockPageScroll() {
   const root = document.documentElement;
@@ -887,7 +908,7 @@ function autoIndex() {
 
 // ---------- folder browser (start screen) ----------
 const BROWSE_PAGE = 200;
-const browse = { path: store.get("mmf.browse", null), data: null, shown: BROWSE_PAGE, seq: 0 };
+const browse = { path: store.get("mmf.browse", null), data: null, shown: BROWSE_PAGE, seq: 0, stale: false };
 const SORT_KEY = "mmf.browseSort";
 let browseSort = { key: "name", dir: "asc" };
 function readBrowseSort() {
@@ -928,7 +949,7 @@ function updateSortDir() {
 function updateHome() {
   const home = !isActive();
   $("hint").classList.toggle("hidden", !home || !state.hasIndex);
-  const show = home && state.hasIndex;
+  const show = home && state.hasFolders; // before anything is indexed too: the files can be looked at meanwhile
   const wasHidden = $("browser").classList.contains("hidden");
   $("browser").classList.toggle("hidden", !show);
   if (show && wasHidden) loadBrowse();
@@ -936,6 +957,7 @@ function updateHome() {
 
 async function loadBrowse(p = browse.path) {
   if (!prefsLoaded) return; // the saved folder isn't known yet; startup loads it afterwards
+  browse.stale = false;
   const seq = ++browse.seq;
   let d;
   try {
@@ -1001,17 +1023,20 @@ function renderBrowse() {
   }
 
   const indexed = d.files.filter((f) => f.indexed);
-  const list = { results: indexed };
+  // the viewer goes through every file here, those not indexed yet too (shown from the file itself)
+  const list = { results: d.files };
   const grid = $("browseGrid");
   grid.innerHTML = "";
-  d.files.slice(0, browse.shown).forEach((f) => {
+  d.files.slice(0, browse.shown).forEach((f, i) => {
     if (f.indexed) {
-      grid.appendChild(tile(f, list, indexed.indexOf(f)));
+      grid.appendChild(tile(f, list, i));
     } else {
-      const el = document.createElement("div");
+      const el = document.createElement("button");
+      el.type = "button";
       el.className = "tile pending";
       el.title = f.path;
       el.innerHTML = `<div><b>${esc(f.name)}</b>${esc(t(f.failed ? "browser.failed" : "browser.pending"))}</div>`;
+      el.onclick = () => openViewer(list, i);
       grid.appendChild(el);
     }
   });
@@ -1546,6 +1571,30 @@ function savePerformance() {
 }
 for (const el of perfInputs) el.onchange = savePerformance;
 
+// ---------- confirm dialog ----------
+// In the app's own look rather than the system's. One at a time: a new one answers the previous one no.
+let confirmDone = null;
+/** Resolves true when `yes` is pressed, false on Cancel, Esc or a click beside the card. */
+function confirmDialog(text, yes) {
+  closeConfirm(false);
+  closeMenu();
+  $("confirmText").textContent = text;
+  $("confirmYes").textContent = yes;
+  $("confirmModal").classList.remove("hidden");
+  $("confirmNo").focus(); // Enter right away cancels: both questions replace or remove something
+  return new Promise((resolve) => { confirmDone = resolve; });
+}
+function closeConfirm(answer) {
+  if (!confirmDone) return;
+  const done = confirmDone;
+  confirmDone = null;
+  $("confirmModal").classList.add("hidden");
+  done(answer);
+}
+$("confirmYes").onclick = () => closeConfirm(true);
+$("confirmNo").onclick = () => closeConfirm(false);
+$("confirmModal").onclick = (e) => { if (e.target === e.currentTarget) closeConfirm(false); };
+
 // ---------- index backup / restore ----------
 // The main process runs the job; this modal shows it until it ends (or is canceled), asking for its state.
 let jobTimer = 0;
@@ -1606,7 +1655,8 @@ const startIndexJob = (start) => async () => {
   } catch (e) { toast(ipcMessage(e), 4000); }
 };
 $("backupBtn").onclick = startIndexJob(() => window.mmf.startBackup(t("backup.pickFolder")));
-$("restoreBtn").onclick = startIndexJob(() => confirm(t("backup.restoreConfirm")) && window.mmf.startRestore(t("backup.pickFile")));
+$("restoreBtn").onclick = startIndexJob(async () => (await confirmDialog(t("backup.restoreConfirm"), t("backup.restore")))
+  && window.mmf.startRestore(t("backup.pickFile")));
 $("jobCancel").onclick = () => window.mmf.cancelIndexJob();
 $("jobClose").onclick = closeIndexJob;
 $("jobReveal").onclick = () => window.mmf.revealBackup();
@@ -1629,6 +1679,18 @@ function closeDrawers() {
 $("openFolders").onclick = () => openDrawer("drawer");
 $("openSettings").onclick = () => openDrawer("settings");
 for (const b of document.querySelectorAll(".close-drawer")) b.onclick = closeDrawers;
+
+// the indexed and excluded folders, both as a grid of cards or as a list
+function applyFolderView(view) {
+  for (const id of ["folders", "excludedList"]) $(id).classList.toggle("as-list", view === "list");
+  for (const b of $("folderView").querySelectorAll("button")) {
+    b.classList.toggle("on", b.dataset.view === view);
+    b.setAttribute("aria-pressed", b.dataset.view === view);
+  }
+}
+for (const b of $("folderView").querySelectorAll("button")) {
+  b.onclick = () => { store.set("mmf.folderView", b.dataset.view); applyFolderView(b.dataset.view); };
+}
 $("scrim").onclick = closeDrawers;
 
 async function addFolder(path) {
@@ -1684,6 +1746,7 @@ async function refreshStatus() {
   lastStatus = s;
   state.progress = p;
   state.hasIndex = stats.images + stats.videos > 0;
+  state.hasFolders = folders.length > 0;
   if (!state.hasIndex) hideBoot(); // otherwise the folder listing replaces the placeholders
   $("welcome").classList.toggle("hidden", folders.length > 0);
   updateHome();
@@ -1693,7 +1756,10 @@ async function refreshStatus() {
   const done = p.done;
   if ((p.running && Math.floor(done / 10) !== Math.floor(lastDone / 10)) || (wasRunning && !p.running)) {
     if (isActive() && !state.viewer.list && !state.expanded) runSearch();
-    else if (!isActive() && !state.viewer.list) loadBrowse(); // new thumbnails / counts
+    else if (!isActive()) { // new thumbnails / counts, and files no longer waiting
+      if (state.viewer.list) browse.stale = true; // once the viewer closes
+      else loadBrowse();
+    }
   }
   lastDone = done;
   wasRunning = p.running;
@@ -1742,13 +1808,14 @@ function renderStatus(s) {
   ul.innerHTML = folders.length ? "" : `<li class="muted small">${esc(t("folders.none"))}</li>`;
   folders.forEach((f) => {
     const li = document.createElement("li");
-    li.innerHTML = `<div class="fp"><b>${esc(f.path.split(/[\\/]/).pop() || f.path)}</b><span>${esc(f.path)}</span><span>${esc(t("status.counts", { photos: num(f.images), videos: num(f.videos) }))}</span></div>`;
+    li.title = f.path; // the whole path, which the card cuts short
+    li.innerHTML = `<div class="fp"><b>${esc(f.path.split(/[\\/]/).pop() || f.path)}</b><span class="tail"><bdi>${esc(f.path)}</bdi></span><span>${esc(t("status.counts", { photos: num(f.images), videos: num(f.videos) }))}</span></div>`;
     const rm = document.createElement("button");
     rm.className = "icon-btn";
     rm.title = t("folder.remove");
     rm.textContent = "×";
     rm.onclick = async () => {
-      if (!confirm(t("folder.removeConfirm", { path: f.path }))) return;
+      if (!(await confirmDialog(t("folder.removeConfirm", { path: f.path }), t("confirm.remove")))) return;
       await post("/api/folders/remove", { path: f.path });
       refreshStatus();
       runSearch();
@@ -1762,7 +1829,8 @@ function renderStatus(s) {
   s.excluded.forEach((p) => {
     const li = document.createElement("li");
     const root = folders.find((f) => p.startsWith(f.path));
-    li.innerHTML = `<div class="fp"><b>${esc(p.split(/[\\/]/).pop())}</b><span>${esc(root ? "…" + p.slice(root.path.length) : p)}</span></div>`;
+    li.title = p; // the whole path, which the card cuts short
+    li.innerHTML = `<div class="fp"><b>${esc(p.split(/[\\/]/).pop())}</b><span class="tail"><bdi>${esc(root ? "…" + p.slice(root.path.length) : p)}</bdi></span></div>`;
     const rm = document.createElement("button");
     rm.className = "icon-btn";
     rm.title = t("excluded.remove");
@@ -1827,6 +1895,7 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
   $("autoplayCheck").checked = store.get("mmf.videoAutoplay", true) !== false;
+  applyFolderView(store.get("mmf.folderView") === "grid" ? "grid" : "list"); // a list unless the grid was chosen
   readBrowseSort();
   syncDropdowns();
   browse.path = store.get("mmf.browse", null);

@@ -122,6 +122,14 @@
 <aside class="drawer" id="drawer" aria-hidden="true">
   <div class="drawer-head">
     <h2 data-i18n="drawer.title"></h2>
+    <div class="seg view-toggle" id="folderView">
+      <button type="button" data-view="grid" aria-pressed="false" data-i18n-title="view.grid">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg>
+      </button>
+      <button class="on" type="button" data-view="list" aria-pressed="true" data-i18n-title="view.list">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+    </div>
     <button class="icon-btn close-drawer" data-i18n-title="close">×</button>
   </div>
   <div class="drawer-body">
@@ -130,13 +138,13 @@
       <input id="pathInput" data-i18n-placeholder="drawer.pathPlaceholder">
       <button class="ghost" data-i18n="drawer.add"></button>
     </form>
-    <ul class="folders" id="folders"></ul>
+    <ul class="folders folder-grid as-list" id="folders"></ul>
     <div class="sub-head">
       <h3 data-i18n="excluded.title"></h3>
       <button class="ghost" id="pickExcluded" data-i18n="excluded.pick"></button>
     </div>
     <p class="muted small sub-note" data-i18n="excluded.note"></p>
-    <ul class="folders" id="excludedList"></ul>
+    <ul class="folders folder-grid as-list" id="excludedList"></ul>
     <p class="muted small" id="statsLine"></p>
     <details id="errorsBox" class="hidden">
       <summary data-i18n="errors.title"></summary>
@@ -262,6 +270,15 @@
       <button class="ghost hidden" id="jobReveal" type="button"></button>
       <button class="ghost hidden" id="jobCancel" type="button" data-i18n="backup.cancel"></button>
       <button class="primary hidden" id="jobClose" type="button" data-i18n="close"></button>
+    </div>
+  </div>
+</div>
+<div class="modal hidden" id="confirmModal" role="alertdialog" aria-modal="true" aria-describedby="confirmText">
+  <div class="modal-card">
+    <p id="confirmText"></p>
+    <div class="row modal-actions">
+      <button class="ghost" id="confirmNo" type="button" data-i18n="backup.cancel"></button>
+      <button class="primary" id="confirmYes" type="button"></button>
     </div>
   </div>
 </div>

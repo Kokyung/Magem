@@ -1012,6 +1012,29 @@ export class Index {
     return { path: dir, root, dirs, files };
   }
 
+  /**
+   * A media file the browser lists but hasn't been indexed yet (so it has no id), for the viewer: only
+   * one the browser could have listed — a media file in a browsable folder, not hidden, and reached
+   * without symbolic links (the listing and the scanner skip those, so a link can't lead outside).
+   * Null when there is no such file.
+   */
+  async browsableFile(file) {
+    if (typeof file !== "string" || !file || !path.isAbsolute(file)) throw badRequest("Only files inside indexed folders can be shown");
+    file = path.resolve(file);
+    const ext = path.extname(file).toLowerCase();
+    if (path.basename(file).startsWith(".") || !(media.IMAGE_EXT.has(ext) || media.VIDEO_EXT.has(ext))) {
+      throw badRequest("Only photos and videos can be shown");
+    }
+    const dir = path.dirname(file);
+    const root = this.browsableRoot(dir);
+    const st = await fs.promises.lstat(file).catch(() => null);
+    if (!st?.isFile()) return null; // missing, a folder, or a link
+    // no linked folder on the way down from the indexed folder (the folder itself may be reached through one)
+    const real = await Promise.all([fs.promises.realpath(dir), fs.promises.realpath(root)]).catch(() => null);
+    if (!real || path.relative(real[1], real[0]).normalize("NFC") !== path.relative(root, dir).normalize("NFC")) return null;
+    return file;
+  }
+
   file(id) {
     return this.db.prepare("SELECT path, kind FROM files WHERE id=?").get(id);
   }
