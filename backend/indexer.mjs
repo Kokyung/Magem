@@ -1070,12 +1070,21 @@ export class Index {
       throw badRequest("Only photos and videos can be shown");
     }
     const dir = path.dirname(file);
-    const root = this.browsableRoot(dir);
+    this.browsableRoot(dir); // inside an indexed folder, and not excluded
+    // the indexed folder nearest to the file: one added inside another may itself be a link to elsewhere
+    const root = this.db.prepare("SELECT path FROM folders").all().map((r) => r.path)
+      .filter((r) => r.normalize("NFC") === dir.normalize("NFC") || isInside(dir, r))
+      .reduce((a, b) => (b.length > a.length ? b : a));
     const st = await fs.promises.lstat(file).catch(() => null);
     if (!st?.isFile()) return null; // missing, a folder, or a link
     // no linked folder on the way down from the indexed folder (the folder itself may be reached through one)
     const real = await Promise.all([fs.promises.realpath(dir), fs.promises.realpath(root)]).catch(() => null);
-    if (!real || path.relative(real[1], real[0]).normalize("NFC") !== path.relative(root, dir).normalize("NFC")) return null;
+    if (!real) return null;
+    const rel = path.relative(real[1], real[0]);
+    // really outside it: e.g. on Linux, a sibling folder whose name differs from it only in Unicode form,
+    // which the comparisons above (made in one form) take for the indexed folder itself
+    if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) return null;
+    if (rel.normalize("NFC") !== path.relative(root, dir).normalize("NFC")) return null;
     return file;
   }
 
