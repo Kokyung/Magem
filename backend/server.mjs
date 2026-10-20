@@ -55,7 +55,7 @@ async function proxyImage(res, url) {
   res.end(body);
 }
 
-export function createServer({ index, staticDir, token, modelName }) {
+export function createServer({ index, previews, staticDir, token, modelName }) {
   const json = (res, obj, code = 200) => {
     const body = Buffer.from(JSON.stringify(obj));
     res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Content-Length": body.length });
@@ -152,6 +152,16 @@ export function createServer({ index, staticDir, token, modelName }) {
         if (p === "/media_path") {
           const file = await index.browsableFile(q.get("path"));
           return file ? sendFile(req, res, file) : json(res, { error: "not found" }, 404);
+        }
+        // its thumbnail, made now: the page asks for the tiles on screen and lets go of those scrolled past
+        if (p === "/preview") {
+          let gone = false;
+          res.on("close", () => { gone = true; }); // before any wait: the page may let go during the checks too
+          const file = await index.browsableFile(q.get("path"));
+          const jpg = file && !gone && await previews.get(file, () => gone || res.destroyed);
+          if (gone || res.destroyed) return;
+          // cached by the page: the address carries the file's modification time
+          return jpg ? sendFile(req, res, jpg, { cache: true }) : json(res, { error: "no preview" }, 404);
         }
         if (p === "/api/prefs") return json(res, index.prefs());
         if (p === "/api/performance") return json(res, index.performance);

@@ -115,6 +115,17 @@ async function withFallback(input, fn) {
   }
 }
 
+const thumbJpeg = (img) => img
+  .resize(THUMB_SIZE, THUMB_SIZE, { fit: "inside", withoutEnlargement: true })
+  .flatten({ background: "#ffffff" })
+  .jpeg({ quality: 80, mozjpeg: true })
+  .toBuffer();
+
+/** Only the thumbnail (JPEG bytes, as the index makes it), for a file shown before it is indexed. */
+export function thumbnailJpeg(input) {
+  return withFallback(input, (src) => thumbJpeg(sharp(src, { failOn: "none", animated: false }).rotate()));
+}
+
 async function decodeAndResize(src, thumbPath) {
   const base = sharp(src, { failOn: "none", animated: false }).rotate();
   const { data, info } = await base.clone()
@@ -122,11 +133,7 @@ async function decodeAndResize(src, thumbPath) {
     .removeAlpha().toColourspace("srgb").raw()
     .toBuffer({ resolveWithObject: true });
   if (thumbPath) {
-    const jpg = await base.clone()
-      .resize(THUMB_SIZE, THUMB_SIZE, { fit: "inside", withoutEnlargement: true })
-      .flatten({ background: "#ffffff" })
-      .jpeg({ quality: 80, mozjpeg: true })
-      .toBuffer();
+    const jpg = await thumbJpeg(base.clone());
     // written aside and renamed: an interrupted write leaves no thumbnail rather than half of one
     // (missing thumbnails are made again by the next indexing run)
     // its own temporary name: overlapping indexed folders can have one file processed twice at once

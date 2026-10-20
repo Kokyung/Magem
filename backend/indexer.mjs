@@ -125,6 +125,8 @@ export class Index {
   constructor(dataDir) {
     this.dataDir = path.resolve(dataDir);
     this.thumbDir = path.join(this.dataDir, "thumbs");
+    this._dirListings = new Map(); // folder → its media count and subfolders, for the browser's counts (_countMedia)
+    this._counting = new Map(); // folder → its count under way: overlapping requests share it
     fs.mkdirSync(this.thumbDir, { recursive: true });
     this.db = new DatabaseSync(path.join(this.dataDir, "index.db"));
     this.db.exec("PRAGMA journal_mode=WAL");
@@ -293,6 +295,7 @@ export class Index {
     const ids = this.db.prepare("SELECT id FROM files WHERE folder=?").all(p).map((r) => r.id);
     this._deleteFiles(ids);
     this.db.prepare("DELETE FROM folders WHERE path=?").run(p);
+    this._forgetListings(p);
     this._dirty = true;
   }
 
@@ -517,6 +520,7 @@ export class Index {
       this._dirty = true;
       // the next run's estimate starts from these (only kinds actually measured)
       this.setPref(PACE_PREF, Object.fromEntries([...this._paceMeasured].map((k) => [k, this._pace[k]])));
+      this.onRunEnd?.();
     }
   }
 
@@ -947,6 +951,57 @@ export class Index {
    * files in it. Without a path, the indexed folders themselves. Only paths inside indexed folders are
    * listed, with the scanner's skip rules (hidden, excluded, …) applied.
    */
+  /**
+   * How many photos and videos are under `dir` on disk now, indexed or not, by the scanner's rules (no
+   * hidden files, skipped and excluded folders left out, links not followed), for the browser's folder
+   * buttons. A folder is listed again only when its modification time changes (adding, removing or
+   * renaming something in it does), so counting again costs one stat per folder.
+   */
+  _countMedia(dir, excluded) {
+    let counting = this._counting.get(dir);
+    if (!counting) {
+      counting = this._countMediaNow(dir, excluded).finally(() => this._counting.delete(dir));
+      this._counting.set(dir, counting);
+    }
+    return counting;
+  }
+
+  async _countMediaNow(dir, excluded) {
+    let st;
+    try { st = await fs.promises.stat(dir); } catch { // gone, or a drive that is offline
+      this._forgetListings(dir);
+      return 0;
+    }
+    let listing = this._dirListings.get(dir);
+    if (listing?.mtime !== st.mtimeMs) {
+      let entries;
+      try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 0; }
+      const old = listing;
+      listing = { mtime: st.mtimeMs, files: 0, dirs: [] };
+      for (const e of entries) {
+        if (e.isDirectory()) listing.dirs.push(e.name);
+        else if (e.isFile() && !e.name.startsWith(".")) {
+          const ext = path.extname(e.name).toLowerCase();
+          if (media.IMAGE_EXT.has(ext) || media.VIDEO_EXT.has(ext)) listing.files++;
+        }
+      }
+      this._dirListings.set(dir, listing);
+      // subfolders deleted or renamed since: their listings (and those under them) go too
+      for (const name of old?.dirs ?? []) if (!listing.dirs.includes(name)) this._forgetListings(path.join(dir, name));
+    }
+    // what is skipped can change (a folder excluded since), so it is checked each time
+    const subs = await Promise.all(listing.dirs.map((name) => {
+      const full = path.join(dir, name);
+      return this._isSkippedDir(full, name, excluded) ? 0 : this._countMedia(full, excluded);
+    }));
+    return subs.reduce((a, b) => a + b, listing.files);
+  }
+
+  _forgetListings(dir) {
+    this._dirListings.delete(dir);
+    for (const key of this._dirListings.keys()) if (isInside(key, dir)) this._dirListings.delete(key);
+  }
+
   /** The indexed folder `dir` belongs to; throws unless `dir` is inside one and not excluded. */
   browsableRoot(dir, roots = this.db.prepare("SELECT path FROM folders").all().map((r) => r.path)) {
     if (typeof dir !== "string" || !dir) throw badRequest("Only folders inside indexed folders can be browsed");
@@ -958,15 +1013,10 @@ export class Index {
 
   async browse(dir) {
     const roots = this.db.prepare("SELECT path FROM folders ORDER BY added_at").all().map((r) => r.path);
-    // indexed paths are root + names as read from disk, the same form `dir` arrives in (it comes from an
-    // earlier listing), so a plain prefix test counts them — fast even for very large libraries
-    const done = this.db.prepare("SELECT path FROM files WHERE status='done'").all().map((r) => r.path);
-    const prefixOf = (d) => (d.endsWith(path.sep) ? d : d + path.sep);
+    const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
     if (!dir) {
       const dirs = await Promise.all(roots.map(async (p) => {
-        const pre = prefixOf(p);
-        let count = 0;
-        for (const f of done) if (f.startsWith(pre)) count++;
+        const count = await this._countMedia(p, excluded);
         let mtime = 0;
         try { mtime = (await fs.promises.stat(p)).mtimeMs; } catch { /* folder gone or offline */ }
         return { name: path.basename(p) || p, path: p, mtime, count };
@@ -974,17 +1024,11 @@ export class Index {
       return { path: null, root: null, dirs, files: [] };
     }
     const root = this.browsableRoot(dir, roots);
-    const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-
-    // indexed files per immediate subfolder, in one pass over the index
-    const childCounts = new Map();
-    const pre = prefixOf(dir);
-    for (const f of done) {
-      if (!f.startsWith(pre)) continue;
-      const i = f.indexOf(path.sep, pre.length);
-      if (i > pre.length) { const child = f.slice(pre.length, i); childCounts.set(child, (childCounts.get(child) || 0) + 1); }
-    }
+    // the photos and videos under each subfolder, all counted at once
+    const counts = new Map(await Promise.all(entries
+      .filter((e) => e.isDirectory() && !this._isSkippedDir(path.join(dir, e.name), e.name, excluded))
+      .map(async (e) => [e.name, await this._countMedia(path.join(dir, e.name), excluded)])));
     const fileRow = this.db.prepare("SELECT id, path, kind, duration, thumb, status FROM files WHERE path=?");
     const firstVisual = this.db.prepare("SELECT id FROM vectors WHERE file_id=? AND modality IN ('image','frame') ORDER BY t LIMIT 1");
     const dirs = [];
@@ -998,7 +1042,7 @@ export class Index {
       const name = e.name.normalize("NFC"); // display only
       const mtime = mtimes.get(e.name);
       if (e.isDirectory()) {
-        if (!this._isSkippedDir(full, e.name, excluded)) dirs.push({ name, path: full, mtime, count: childCounts.get(e.name) || 0 });
+        if (!this._isSkippedDir(full, e.name, excluded)) dirs.push({ name, path: full, mtime, count: counts.get(e.name) });
         continue;
       }
       const ext = path.extname(e.name).toLowerCase();
@@ -1037,6 +1081,10 @@ export class Index {
 
   file(id) {
     return this.db.prepare("SELECT path, kind FROM files WHERE id=?").get(id);
+  }
+
+  isIndexed(file) {
+    return !!this.db.prepare("SELECT 1 FROM files WHERE path=? AND status='done'").get(file);
   }
 
   /**

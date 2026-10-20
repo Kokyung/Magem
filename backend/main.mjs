@@ -2,6 +2,7 @@
 import path from "node:path";
 import * as embedder from "./embedder.mjs";
 import { Index } from "./indexer.mjs";
+import { Previews } from "./previews.mjs";
 import { createServer } from "./server.mjs";
 
 const { MMF_DATA, MMF_MODELS, MMF_STATIC, MMF_TOKEN } = process.env;
@@ -15,7 +16,10 @@ try { index.setConditions(JSON.parse(process.env.MMF_CONDITIONS || "{}")); } cat
 process.parentPort?.on("message", ({ data }) => {
   if (data?.type === "conditions") index.setConditions(data);
 });
-const server = createServer({ index, staticDir: path.resolve(MMF_STATIC), token: MMF_TOKEN, modelName: "EmbeddingGemma 2" });
+const previews = new Previews(path.join(MMF_DATA, "previews"), index);
+// files indexed by the run that just ended have their own thumbnails now
+index.onRunEnd = () => previews.sweep().catch((e) => send({ type: "log", message: `preview sweep failed: ${e.message}` }));
+const server = createServer({ index, previews, staticDir: path.resolve(MMF_STATIC), token: MMF_TOKEN, modelName: "EmbeddingGemma 2" });
 
 server.listen(0, "127.0.0.1", () => {
   send({ type: "ready", port: server.address().port });

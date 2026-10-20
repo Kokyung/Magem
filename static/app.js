@@ -557,7 +557,7 @@ function openViewer(list, i) {
   $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t("viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
 
   const media = $("viewerMedia");
-  media.innerHTML = "";
+  clearViewerMedia();
   hideViewerToast();
   // The picture or video stays hidden behind a loading sign until it can show whole (decoded, or the
   // video's first frame), so it never draws in. A file the engine can't read at all says so instead.
@@ -573,10 +573,13 @@ function openViewer(list, i) {
     img.className = "loading";
     img.onload = () => img.decode().catch(() => {}).then(() => shown(img));
     let fellBack = false;
+    // readable but not by the browser (e.g. HEIC): its thumbnail, or a preview before it is indexed
+    const fallback = r.thumb ? `/thumb/${r.thumb}` : r.id == null && !r.failed ? previewUrl(r) : null;
     img.onerror = async () => {
-      if (fellBack || !r.thumb || !(await fileReadable(r))) return unreadable(img);
+      if (fellBack || !fallback || !(await fileReadable(r))) return unreadable(img);
+      if (!img.isConnected) return; // moved on meanwhile: no request for a picture nobody sees
       fellBack = true;
-      img.src = `/thumb/${r.thumb}`; // readable but not by the browser (e.g. HEIC): its thumbnail
+      img.src = fallback;
     };
     img.src = mediaUrl(r);
     media.append(img, loader);
@@ -642,6 +645,12 @@ function openViewer(list, i) {
   }
 }
 
+/** Empty the picture area; a picture still loading (e.g. a preview being made) lets go of its request. */
+function clearViewerMedia() {
+  for (const img of $("viewerMedia").querySelectorAll("img")) img.removeAttribute("src");
+  $("viewerMedia").innerHTML = "";
+}
+
 /** The file itself; one in the folder browser that isn't indexed yet has no id, only its path. */
 const mediaUrl = (r) => (r.id == null ? `/media_path?path=${encodeURIComponent(r.path)}` : `/media/${r.id}`);
 
@@ -666,7 +675,7 @@ function flashPlayState(playing) {
 function closeViewer() {
   if (isViewerFullscreen()) document.exitFullscreen().catch(() => {});
   $("viewer").classList.add("hidden");
-  $("viewerMedia").innerHTML = "";
+  clearViewerMedia();
   resetZoom(null);
   hideViewerToast();
   clearTimeout(wakeViewerControls._t);
@@ -908,7 +917,7 @@ function autoIndex() {
 
 // ---------- folder browser (start screen) ----------
 const BROWSE_PAGE = 200;
-const browse = { path: store.get("mmf.browse", null), data: null, shown: BROWSE_PAGE, seq: 0, stale: false };
+const browse = { path: store.get("mmf.browse", null), want: undefined, data: null, shown: BROWSE_PAGE, seq: 0, stale: false };
 const SORT_KEY = "mmf.browseSort";
 let browseSort = { key: "name", dir: "asc" };
 function readBrowseSort() {
@@ -955,9 +964,12 @@ function updateHome() {
   if (show && wasHidden) loadBrowse();
 }
 
-async function loadBrowse(p = browse.path) {
+// p left out: the folder asked for last, not the one on screen (a refresh while another folder is still
+// loading would otherwise ask for the old one again, and its answer would replace the new one)
+async function loadBrowse(p = browse.want !== undefined ? browse.want : browse.path) {
   if (!prefsLoaded) return; // the saved folder isn't known yet; startup loads it afterwards
   browse.stale = false;
+  browse.want = p;
   const seq = ++browse.seq;
   let d;
   try {
@@ -1027,6 +1039,7 @@ function renderBrowse() {
   const list = { results: d.files };
   const grid = $("browseGrid");
   grid.innerHTML = "";
+  previewObserver.disconnect(); // the tiles it watched are gone
   d.files.slice(0, browse.shown).forEach((f, i) => {
     if (f.indexed) {
       grid.appendChild(tile(f, list, i));
@@ -1037,6 +1050,7 @@ function renderBrowse() {
       el.title = f.path;
       el.innerHTML = `<div><b>${esc(f.name)}</b>${esc(t(f.failed ? "browser.failed" : "browser.pending"))}</div>`;
       el.onclick = () => openViewer(list, i);
+      if (!f.failed) { el._file = f; previewObserver.observe(el); } // the engine couldn't read it: no picture either
       grid.appendChild(el);
     }
   });
@@ -1049,6 +1063,7 @@ function renderBrowse() {
     b.onclick = () => { browse.shown += BROWSE_PAGE; renderBrowse(); };
     more.appendChild(b);
   }
+  pumpPreviews(); // lets go of the previews the old tiles were waiting for
   const imgs = indexed.filter((f) => f.kind === "image").length;
   const pending = d.files.filter((f) => !f.indexed && !f.failed).length;
   const failed = d.files.filter((f) => f.failed).length;
@@ -1056,6 +1071,56 @@ function renderBrowse() {
     : !d.files.length && !d.dirs.length ? t("browser.empty")
     : d.files.length ? [t("count.photos", { n: num(imgs) }), t("count.videos", { n: num(indexed.length - imgs) }),
       pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) })].filter(Boolean).join(" / ") : "";
+}
+
+// ---------- previews of files not indexed yet ----------
+// The engine makes these on request, so only tiles on (or near) the screen ask, a few at a time: the page
+// has six connections to the engine, and searches and the status line need theirs meanwhile. A tile that
+// leaves the page (another folder, or drawn again) lets go of its request, and the engine then skips it.
+const PREVIEW_PARALLEL = 3;
+const previewUrl = (f) => `/preview?path=${encodeURIComponent(f.path)}&m=${f.mtime}`; // a changed file: a new address
+const previewQueue = [];
+const previewLoading = new Set();
+const previewObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    e.target._near = e.isIntersecting;
+    if (e.isIntersecting && !e.target._queued) { e.target._queued = true; previewQueue.push(e.target); }
+  }
+  pumpPreviews();
+}, { rootMargin: "200px" });
+function pumpPreviews() {
+  for (const job of previewLoading) if (!job.el.isConnected) job.ctl.abort();
+  while (previewLoading.size < PREVIEW_PARALLEL && previewQueue.length) {
+    const el = previewQueue.shift();
+    el._queued = false;
+    // scrolled past before its turn: it is queued again if it comes back into view
+    if (el.isConnected && el._near) loadPreview(el);
+  }
+}
+async function loadPreview(el) {
+  const job = { el, ctl: new AbortController() };
+  previewLoading.add(job);
+  try {
+    const url = previewUrl(el._file);
+    const res = await fetch(url, { signal: job.ctl.signal });
+    previewObserver.unobserve(el); // made, or the engine can't: either way, not asked again
+    if (!res.ok) return;
+    await res.blob(); // now in the browser's cache, where the picture below loads it from
+    const img = new Image();
+    img.alt = "";
+    img.onload = () => {
+      if (!el.isConnected) return;
+      // the picture, still marked as waiting; the name on hover, as on indexed tiles
+      el.classList.add("has-preview");
+      el.replaceChildren(img, Object.assign(document.createElement("span"), { className: "badge tl", textContent: t("browser.pending") }),
+        Object.assign(document.createElement("span"), { className: "name", textContent: el._file.name }));
+    };
+    img.src = url;
+  } catch { /* let go of, or failed: the tile keeps its label */ }
+  finally {
+    previewLoading.delete(job);
+    pumpPreviews();
+  }
 }
 
 // ---------- recent searches ----------
