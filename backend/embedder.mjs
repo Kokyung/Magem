@@ -1,17 +1,18 @@
-// EmbeddingGemma 2 (ONNX) running in-process via transformers.js + onnxruntime-node.
+// EmbeddingGemma 2 (ONNX) via transformers.js + onnxruntime-node, on a worker thread (embed-worker.mjs).
 // Tries the GPU first (WebGPU / DirectML) and falls back to CPU, so it runs on any supported machine.
-import os from "node:os";
-import { AutoModel, AutoProcessor, RawImage, env } from "@huggingface/transformers";
+// The queue (searches first, the rests between indexing calls) is kept here; the worker runs one call at a time.
+import { Worker } from "node:worker_threads";
 
 export const MODEL_ID = "embeddinggemma-2-ONNX";
 export const QUERY_PREFIX = "task: search result | query: ";
 // fp16 is fastest on GPU and no slower than q8 on CPU; audio is fine at q8 (cos 0.987 vs full precision)
 const DTYPE = { model: "fp16", vision_encoder: "fp16", audio_encoder: "q8" };
-const DIM = 768;
 
 export const engine = { status: "idle", device: null, error: null };
-let model = null;
-let processor = null;
+let worker = null;
+let calls = new Map(); // id → { resolve, reject }, answered by the worker
+let nextId = 0;
+let paths = null; // { modelsDir, cacheDir }
 let loading = null;
 // inference runs one call at a time; search queries jump ahead of indexing work
 const pending = { high: [], low: [] };
@@ -47,10 +48,7 @@ export function candidateDevices() {
 }
 
 export function init({ modelsDir, cacheDir }) {
-  env.localModelPath = modelsDir.endsWith("/") ? modelsDir : modelsDir + "/";
-  env.allowRemoteModels = false;
-  env.allowLocalModels = true;
-  env.cacheDir = cacheDir;
+  paths = { modelsDir, cacheDir };
 }
 
 export function load() {
@@ -60,45 +58,52 @@ export function load() {
 
 async function doLoad() {
   engine.status = "loading";
-  processor = await AutoProcessor.from_pretrained(MODEL_ID);
-  const errors = [];
-  for (const device of candidateDevices()) {
-    try {
-      const m = await AutoModel.from_pretrained(MODEL_ID, {
-        device, dtype: DTYPE,
-        session_options: device === "cpu" ? { intraOpNumThreads: Math.max(1, os.availableParallelism() - 1) } : {},
-      });
-      model = m;
-      await selfTest(); // exercise all three encoders: some GPUs load fine and then fail on first run
-      engine.status = "ready";
-      engine.device = device;
-      engine.error = null;
-      return;
-    } catch (e) {
-      errors.push(`${device}: ${e.message}`);
-      try { await model?.dispose(); } catch {}
-      model = null;
-    }
+  const w = worker = new Worker(new URL("./embed-worker.mjs", import.meta.url));
+  w.on("message", ({ id, ok, value, error }) => {
+    const call = calls.get(id);
+    calls.delete(id);
+    if (ok) call?.resolve(value); else call?.reject(new Error(error));
+  });
+  // the thread died (out of memory, a crash in the GPU driver): what was asked of it fails, and the next
+  // call loads the model again on a new one
+  const lost = (e) => {
+    if (worker !== w) return;
+    worker = null;
+    loading = null;
+    for (const call of calls.values()) call.reject(e);
+    calls = new Map();
+    engine.status = "error";
+    engine.error = e.message;
+  };
+  w.on("error", lost);
+  w.on("exit", (code) => lost(new Error(`The model stopped (code ${code})`)));
+  try {
+    engine.device = await call({ type: "load", modelId: MODEL_ID, dtype: DTYPE, devices: candidateDevices(), ...paths });
+    engine.status = "ready";
+    engine.error = null;
+  } catch (e) {
+    engine.status = "error";
+    engine.error = e.message;
+    lost(e);
+    w.terminate();
+    throw new Error(`Couldn't load the model — ${e.message}`);
   }
-  engine.status = "error";
-  engine.error = errors.join(" / ");
-  throw new Error(`Couldn't load the model — ${engine.error}`);
 }
 
-async function selfTest() {
-  const img = new RawImage(new Uint8ClampedArray(64 * 64 * 3).fill(128), 64, 64, 3);
-  // ahead of (and without the rests of) indexing work: a search may be waiting for the model
-  const vecs = [
-    ...(await run(() => processor([QUERY_PREFIX + "test"]), true)),
-    ...(await run(() => processor(null, [[img]]), true)),
-    ...(await run(() => processor(null, null, [[new Float32Array(16000)]]), true)),
-  ];
-  for (const v of vecs) if (!v.every(Number.isFinite)) throw new Error("self-test produced NaN");
-}
-
-function run(makeInputs, priority = false) {
+/** A message to the worker, answered by its id. */
+function call(msg) {
   return new Promise((resolve, reject) => {
-    pending[priority ? "high" : "low"].push({ makeInputs, resolve, reject });
+    if (!worker) return reject(new Error("The model isn't loaded"));
+    const id = ++nextId;
+    calls.set(id, { resolve, reject });
+    worker.postMessage({ ...msg, id });
+  });
+}
+
+/** kind: text | images | audio, with what the worker turns into the model's input. */
+function run(kind, data, priority = false) {
+  return new Promise((resolve, reject) => {
+    pending[priority ? "high" : "low"].push({ kind, data, resolve, reject });
     pump();
   });
 }
@@ -126,10 +131,9 @@ async function pump() {
   busy = true;
   const started = Date.now();
   try {
-    const t = (await model(await job.makeInputs())).sentence_embedding;
-    const res = [];
-    for (let i = 0; i < t.dims[0]; i++) res.push(normalize(Float32Array.from(t.data.subarray(i * DIM, (i + 1) * DIM))));
-    job.resolve(res);
+    // a worker lost since the job was queued is replaced first: nothing goes to one still loading its model
+    await load();
+    job.resolve(await call({ type: "embed", kind: job.kind, data: job.data }));
   } catch (e) {
     job.reject(e);
   } finally {
@@ -142,33 +146,26 @@ async function pump() {
   }
 }
 
-function normalize(v) {
-  let s = 0;
-  for (let i = 0; i < v.length; i++) s += v[i] * v[i];
-  s = Math.sqrt(s) || 1;
-  for (let i = 0; i < v.length; i++) v[i] /= s;
-  return v;
-}
-
 export async function embedTexts(texts) {
   await load();
-  return run(() => processor(texts.map((t) => QUERY_PREFIX + t)), true);
+  return run("text", texts.map((t) => QUERY_PREFIX + t), true);
 }
 
 /** Corpus-side text (file names, recognized text), already in "title: … | text: …" form. */
 export async function embedDocs(docs) {
   await load();
-  return run(() => processor(docs));
+  return run("text", docs);
 }
 
 /** images: RawImage[] — each becomes its own embedding; priority for interactive queries */
 export async function embedImages(images, { priority = false } = {}) {
   await load();
-  return run(() => processor(null, images.map((im) => [im])), priority);
+  // the pixels alone (a copy: the image may be a view into a larger buffer, which would be copied whole)
+  return run("images", images.map((im) => ({ data: im.data.slice(), width: im.width, height: im.height, channels: im.channels })), priority);
 }
 
 /** clips: Float32Array[] of mono 16 kHz samples */
 export async function embedAudio(clips) {
   await load();
-  return run(() => processor(null, null, clips.map((a) => [a])));
+  return run("audio", clips);
 }
