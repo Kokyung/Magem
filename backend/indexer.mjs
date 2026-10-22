@@ -37,6 +37,8 @@ const NAME_CATCH_UP_MS = 10000;
 const PACE_GUESS = { image: 0.5, video: 7, name: 0.01, date: 0.005 };
 const PACE_PREF = "index.throughput"; // "index.pace" held per-worker times, a different measure
 const DATE_WORKERS = 4;
+const WATCH_QUIET_MS = 5000; // changes in the indexed folders start a run once quiet this long…
+const WATCH_MAX_WAIT_MS = 60000; // …or this long after the first, while they keep coming
 
 // Generic queries used to estimate how much each vector matches "anything". Because the mean of dot
 // products equals the dot product with the mean, one averaged anchor vector is enough.
@@ -127,6 +129,9 @@ export class Index {
     this.thumbDir = path.join(this.dataDir, "thumbs");
     this._dirListings = new Map(); // folder → its media count and subfolders, for the browser's counts (_countMedia)
     this._counting = new Map(); // folder → its count under way: overlapping requests share it
+    this._watchers = new Map(); // indexed folder → its fs.watch (see watchFolders)
+    this._watchTimer = null;
+    this._watchSince = 0; // the first change not yet acted on
     fs.mkdirSync(this.thumbDir, { recursive: true });
     this.db = new DatabaseSync(path.join(this.dataDir, "index.db"));
     this.db.exec("PRAGMA journal_mode=WAL");
@@ -186,7 +191,66 @@ export class Index {
     p = path.resolve(p.replace(/^~(?=$|[\\/])/, os.homedir()));
     if (!fs.existsSync(p) || !fs.statSync(p).isDirectory()) throw badRequest(`Folder not found: ${p}`);
     this.db.prepare("INSERT OR IGNORE INTO folders VALUES (?, ?)").run(p, Date.now() / 1000);
+    this.watchFolders();
     return p;
+  }
+
+  /**
+   * Notice files added, changed or deleted in the indexed folders while the app runs (also with no window:
+   * in the tray, or closed on macOS), and index them like a launch does. Changes come in bursts (a copy of
+   * many files, a file written in parts), so a run starts once they have been quiet for a few seconds, or a
+   * minute into a long one; a change during a run makes it scan again when it ends (start()).
+   */
+  watchFolders() {
+    const roots = new Set(this.folders().map((f) => f.path));
+    for (const [root, w] of this._watchers) if (!roots.has(root)) { w.close(); this._watchers.delete(root); }
+    for (const root of roots) {
+      if (this._watchers.has(root)) continue;
+      try {
+        const w = fs.watch(root, { recursive: true }, (_type, name) => this._onFolderChange(root, name));
+        // e.g. the folder was deleted or its drive unplugged: watched again at the next launch or when added again
+        w.on("error", () => { w.close(); if (this._watchers.get(root) === w) this._watchers.delete(root); });
+        this._watchers.set(root, w);
+      } catch { /* offline now: the launch and window-focus runs still cover it */ }
+    }
+  }
+
+  _onFolderChange(root, name) {
+    if (!name) return this._scheduleWatchRun(); // the platform didn't say what changed
+    const full = this._watchedPath(root, String(name));
+    if (!full) return;
+    const ext = path.extname(full).toLowerCase();
+    if (media.IMAGE_EXT.has(ext) || media.VIDEO_EXT.has(ext)) return this._scheduleWatchRun();
+    // anything else matters only as a folder (created, renamed), or once gone (a deleted folder's files leave the index)
+    fs.promises.stat(full).then((st) => { if (st.isDirectory()) this._scheduleWatchRun(); }, () => this._scheduleWatchRun());
+  }
+
+  /**
+   * root/name if the scan would look at it, else null: changes in skipped folders (hidden, node_modules,
+   * ~/Library, AppData, excluded, our own data) keep coming in a large folder and must not start runs.
+   */
+  _watchedPath(root, name) {
+    const now = Date.now();
+    if (!this._watchExcluded || now - this._watchExcluded.at > 2000) {
+      this._watchExcluded = { at: now, set: new Set(this.excluded().map((d) => d.normalize("NFC"))) };
+    }
+    let full = root;
+    for (const part of name.split(/[\\/]/).filter(Boolean)) {
+      full = path.join(full, part);
+      if (this._isSkippedDir(full, part, this._watchExcluded.set)) return null; // also hidden files (a leading dot)
+    }
+    return full === root ? null : full;
+  }
+
+  _scheduleWatchRun() {
+    const now = Date.now();
+    if (!this._watchTimer) this._watchSince = now;
+    clearTimeout(this._watchTimer);
+    const wait = Math.max(0, Math.min(WATCH_QUIET_MS, this._watchSince + WATCH_MAX_WAIT_MS - now));
+    this._watchTimer = setTimeout(() => {
+      this._watchTimer = null;
+      this.startAuto(); // not while paused; on battery the run waits at its gate
+    }, wait);
   }
 
   /** Small UI settings (recent searches, …) kept as JSON text. */
@@ -296,6 +360,7 @@ export class Index {
     this._deleteFiles(ids);
     this.db.prepare("DELETE FROM folders WHERE path=?").run(p);
     this._forgetListings(p);
+    this.watchFolders();
     this._dirty = true;
   }
 
@@ -325,8 +390,21 @@ export class Index {
     this._running = this._runIndex().finally(() => {
       this._running = null;
       if (this._again && !this._stop) this.start();
+      this._reportRunning();
     });
+    this._reportRunning();
     return true;
+  }
+
+  /**
+   * Tell onRunning whether a run is going on, one asked to stop included until it has (it finishes the file
+   * in hand first): a start in between would be lost, as the run ends anyway.
+   */
+  _reportRunning() {
+    const running = !!this._running;
+    if (running === this._reported) return;
+    this._reported = running;
+    this.onRunning?.(running);
   }
 
   stop() {
@@ -470,6 +548,7 @@ export class Index {
     try {
       await this._gate(0, () => true); // on battery, not even the scan
       const todo = this._stop ? [] : (await this._scan()).filter((it) => this._needsWork(it));
+      if (todo.length && !this._stop) this.onWork?.(todo.length); // e.g. a notice when no window is open
       // counted now so the estimate covers the indexing still to come during the passes below
       this._left = { image: todo.filter((it) => it.kind === "image").length, video: todo.filter((it) => it.kind === "video").length };
       if (!this._stop) await this._repairThumbs(new Set(todo.map((it) => it.path)));
@@ -572,6 +651,10 @@ export class Index {
 
   async _indexOne(it) {
     if (!this._hasFolder(it.folder) || this._isExcluded(it.path)) return; // removed/excluded after the scan
+    // deleted since the scan, or changed (e.g. still being copied): the change brings another run, which
+    // indexes the file as it is then
+    const st = await fs.promises.stat(it.path).catch(() => null);
+    if (!st || st.mtimeMs / 1000 !== it.mtime || st.size !== it.size) return;
     this.progress.current = it.path;
     try {
       const { duration, thumb, vecs } = it.kind === "image" ? await this._processImage(it.path) : await this._processVideo(it.path);
@@ -599,6 +682,8 @@ export class Index {
     } catch (e) {
       // stopped midway: not a failure — the file is simply picked up again on the next run
       if (this._stop || !this._hasFolder(it.folder) || this._isExcluded(it.path)) return;
+      // deleted while being processed: not a failure either (the next scan drops it from the index)
+      if (!(await fs.promises.stat(it.path).catch(() => null))) return;
       this.progress.errors++;
       this.db.prepare(
         `INSERT INTO files (path, kind, folder, mtime, size, status, error, indexed_at) VALUES (?,?,?,?,?,'error',?,?)

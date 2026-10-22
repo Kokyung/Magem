@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,11 +27,13 @@ const IS_WIN = process.platform === "win32";
 const TRAY_PLATFORM = IS_WIN && (app.isPackaged || !!process.env.MMF_DEV_DATA);
 let runInBackground = true;
 let tray = null;
+let indexRunning = false; // as the engine last said: the tray menu offers to pause it, or else to start
 let trayImage = null;
 let trayNoticeShown = false; // the one-time "still running in the tray" notice, saved as mmf.trayNotice
 let trayLabels = { // replaced by the page's language
-  open: "Open Magem", settings: "Settings", quit: "Quit",
+  open: "Open Magem", settings: "Settings", quit: "Quit", start: "Start indexing", pause: "Pause indexing",
   notice: "Magem is still running in the system tray and keeps indexing. To quit, use the tray icon’s menu.",
+  indexing: "Indexing {n} new photos and videos in the background.", // {n}: how many
   // the quit confirmation while a backup / restore runs
   jobQuitBackup: "Backing up the index. Quit anyway?", jobQuitRestore: "Restoring the index. Quit anyway?", keepRunning: "Cancel",
 };
@@ -143,6 +145,12 @@ function startBackend() {
         log.write(`[engine] listening on 127.0.0.1:${msg.port}\n`);
         resolve(msg.port);
         sendConditions();
+      } else if (msg?.type === "running") {
+        indexRunning = msg.running === true;
+        updateTrayMenu();
+        updateDockMenu();
+      } else if (msg?.type === "indexing") {
+        showIndexingNotice(msg.files);
       } else if (msg?.type === "log") {
         log.write(`[engine] ${msg.message}\n`);
       }
@@ -298,8 +306,25 @@ function updateTrayMenu() {
     { label: trayLabels.open, click: () => showWindow() },
     { label: trayLabels.settings, click: () => showWindow("settings") },
     { type: "separator" },
+    indexingItem(),
+    { type: "separator" },
     { label: trayLabels.quit, click: () => app.quit() },
   ]));
+}
+
+/** macOS: the Dock icon's menu (the system adds its own items below). */
+function updateDockMenu() {
+  // once the engine is up: before, the item would have nothing to ask
+  if (process.platform === "darwin" && baseUrl) app.dock?.setMenu(Menu.buildFromTemplate([indexingItem()]));
+}
+
+/** Pause, or start: only the one that applies now. Like the button next to the status line, a start also ends a pause. */
+function indexingItem() {
+  return { label: indexRunning ? trayLabels.pause : trayLabels.start, click: () => toggleIndexing() };
+}
+
+function toggleIndexing() {
+  engine(indexRunning ? "/api/pause" : "/api/resume", {}).catch((e) => logMain(`tray ${indexRunning ? "pause" : "start"} failed: ${e.message}`));
 }
 
 /** The first time closing the window leaves the app in the tray, say so — people would think it quit. */
@@ -308,6 +333,28 @@ function showTrayNotice() {
   trayNoticeShown = true;
   tray.displayBalloon({ title: "Magem", content: trayLabels.notice, icon: trayImage, noSound: true });
   savePref("mmf.trayNotice", true);
+}
+
+/**
+ * A run with files to index started while no window is shown (new files noticed in an indexed folder, or a
+ * start at login): say so, as a system notification (bottom right on Windows). Clicking it opens the window.
+ * At most one a minute, as files arriving over a while can start several runs.
+ */
+let indexingNotice = null; // kept: a notification nothing refers to may be collected before it is clicked
+let indexingNoticeAt = 0;
+function showIndexingNotice(files) {
+  if (quitting || !conditions().inBackground || !Notification.isSupported() || !(files > 0)) return;
+  if (Date.now() - indexingNoticeAt < 60000) return;
+  indexingNoticeAt = Date.now();
+  indexingNotice = new Notification({
+    title: "Magem", body: trayLabels.indexing.replace("{n}", Number(files).toLocaleString(app.getLocale())), silent: true,
+    ...(trayImage ? { icon: trayImage } : {}),
+  });
+  indexingNotice.on("click", () => showWindow());
+  // e.g. macOS: notifications turned off for the app, or never allowed (then nothing shows, so say why in the log)
+  indexingNotice.on("failed", (_e, err) => logMain(`background indexing notice failed: ${err}`));
+  indexingNotice.show();
+  logMain(`background indexing notice: ${files} files`);
 }
 
 /** Take text the page translated (only plain strings, only ever shown as text); true if any changed. */
@@ -320,9 +367,10 @@ function applyTrayLabels(labels) {
   return changed;
 }
 ipcMain.handle("set-tray-labels", (_e, labels) => {
-  if (!applyTrayLabels(labels) || !TRAY_PLATFORM) return;
-  updateTrayMenu();
-  savePref("mmf.trayLabels", trayLabels); // a start in the background has no page to translate them
+  if (!applyTrayLabels(labels)) return;
+  if (TRAY_PLATFORM) updateTrayMenu();
+  updateDockMenu();
+  savePref("mmf.trayLabels", trayLabels); // a start in the background has no page to translate them (or the notices)
 });
 
 /**
@@ -624,6 +672,7 @@ app.whenReady().then(async () => {
     await setAuthCookie();
     await applySavedPrefs();
     if (TRAY_PLATFORM) createTray();
+    updateDockMenu();
     if (START_HIDDEN) {
       // opened at login to run in the tray: the window is loaded when asked for (tray, second launch)
       logMain("started in the background");

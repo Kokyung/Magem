@@ -1465,7 +1465,8 @@ function applyLanguage(code) {
   if (lastStatus) renderStatus(lastStatus);
   // once the saved language is known: the main process keeps these for a start without a window
   if (prefsLoaded) window.mmf?.setTrayLabels?.({
-    open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice"),
+    open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice"), indexing: t("tray.indexing"),
+    start: t("index.start"), pause: t("index.pause"),
     jobQuitBackup: t("backup.quitBackup"), jobQuitRestore: t("backup.quitRestore"), keepRunning: t("backup.cancel"),
   });
 }

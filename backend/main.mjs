@@ -17,6 +17,10 @@ process.parentPort?.on("message", ({ data }) => {
   if (data?.type === "conditions") index.setConditions(data);
 });
 const previews = new Previews(path.join(MMF_DATA, "previews"), index);
+// a run with files to index: the main process tells the user when no window is open
+index.onWork = (files) => send({ type: "indexing", files });
+index.onRunning = (running) => send({ type: "running", running }); // the tray menu offers pause or start
+index.watchFolders();
 // files indexed by the run that just ended have their own thumbnails now
 index.onRunEnd = () => previews.sweep().catch((e) => send({ type: "log", message: `preview sweep failed: ${e.message}` }));
 const server = createServer({ index, previews, staticDir: path.resolve(MMF_STATIC), token: MMF_TOKEN, modelName: "EmbeddingGemma 2" });
