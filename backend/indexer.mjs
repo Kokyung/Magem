@@ -680,10 +680,11 @@ export class Index {
       }
       this._dirty = true;
     } catch (e) {
-      // stopped midway: not a failure — the file is simply picked up again on the next run
-      if (this._stop || !this._hasFolder(it.folder) || this._isExcluded(it.path)) return;
-      // deleted while being processed: not a failure either (the next scan drops it from the index)
+      // deleted while being processed: not a failure (the next scan drops it from the index)
       if (!(await fs.promises.stat(it.path).catch(() => null))) return;
+      // stopped midway: not a failure either — the file is simply picked up again on the next run. Checked
+      // after the wait above, so a folder removed or excluded meanwhile gets no error row back
+      if (this._stop || !this._hasFolder(it.folder) || this._isExcluded(it.path)) return;
       this.progress.errors++;
       this.db.prepare(
         `INSERT INTO files (path, kind, folder, mtime, size, status, error, indexed_at) VALUES (?,?,?,?,?,'error',?,?)
