@@ -26,7 +26,7 @@ const MIME = {
 
 // UI settings the page stores here: its address (a random port) changes every launch, so the browser's
 // own storage would start empty each time. The tray keys are the Electron main process's own.
-const PREF_KEYS = new Set(["mmf.recent", "mmf.browse", "mmf.lang", "mmf.theme", "mmf.browseSort", "mmf.background", "mmf.videoAutoplay", "mmf.folderView",
+const PREF_KEYS = new Set(["mmf.recent", "mmf.browse", "mmf.lang", "mmf.theme", "mmf.browseSort", "mmf.background", "mmf.videoAutoplay", "mmf.folderView", "mmf.downloadFolder", "mmf.downloadPostFolder", "mmf.webDownload",
   "mmf.trayLabels", "mmf.trayNotice"]);
 
 const IMAGE_FETCH_LIMIT = 25 << 20;
@@ -272,6 +272,7 @@ export function createServer({ index, previews, staticDir, token, modelName }) {
           return json(res, { ok: true });
         }
         if (p === "/api/folder") return json(res, { path: body.path, root: index.browsableRoot(body.path) });
+        if (p === "/api/download_folder") return json(res, { root: index.indexableFolder(body.path) });
       }
       return json(res, { error: "not found" }, 404);
     } catch (e) {

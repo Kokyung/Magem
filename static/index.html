@@ -13,8 +13,8 @@
     <span>Magem</span>
   </div>
   <div class="search-wrap">
-  <button class="icon-btn home-btn" id="homeBtn" data-i18n-title="home">
-    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 9.8V19h4v-5h3v5h4V9.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <button class="ghost icon-only" id="homeBtn" data-i18n-title="home">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 9.8V19h4v-5h3v5h4V9.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <form class="search" id="searchForm" autocomplete="off">
     <div class="query-image hidden" id="queryImage">
@@ -29,13 +29,14 @@
     <div class="recent hidden" id="recent" role="listbox" data-i18n-label="recent.title"></div>
   </form>
   </div>
-  <button class="ghost" id="openFolders">
+  <button class="ghost icon-only" id="openFolders" data-i18n-title="top.folders">
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
-    <span data-i18n="top.folders"></span>
   </button>
-  <button class="ghost" id="openSettings">
+  <button class="ghost icon-only hidden" id="openDownloads" data-i18n-title="top.downloads">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <button class="ghost icon-only" id="openSettings" data-i18n-title="top.settings">
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
-    <span data-i18n="top.settings"></span>
   </button>
 </header>
 
@@ -219,6 +220,43 @@
       </div>
       <p class="muted small backup-note" data-i18n="backup.note"></p>
     </div>
+    <div class="setting" id="experimentalRow">
+      <span data-i18n="settings.experimental"></span>
+      <div class="setting-group">
+        <label class="setting-check">
+          <input type="checkbox" id="webDownloadCheck"> <span data-i18n="dl.title"></span>
+        </label>
+        <p class="muted small setting-note" data-i18n="settings.webDownloadNote"></p>
+      </div>
+    </div>
+  </div>
+</aside>
+<aside class="drawer" id="downloads" aria-hidden="true">
+  <div class="drawer-head">
+    <h2 data-i18n="dl.title"></h2>
+    <button class="icon-btn close-drawer" data-i18n-title="close">×</button>
+  </div>
+  <div class="drawer-body">
+    <form id="dlForm" class="dl-form">
+      <div class="sub-head">
+        <h3 data-i18n="dl.urlsTitle"></h3>
+        <button class="icon-btn" id="dlAddUrl" type="button" data-i18n-title="dl.addUrl">+</button>
+      </div>
+      <ul class="dl-urls" id="dlUrls"></ul>
+      <p class="muted small hidden" id="dlNoFolder" data-i18n="dl.noFolder"></p>
+      <button class="primary wide" id="dlStart" data-i18n="dl.start"></button>
+      <label class="setting-check" data-i18n-title="dl.postFolderTip">
+        <input type="checkbox" id="dlPostFolder" checked> <span data-i18n="dl.postFolder"></span>
+      </label>
+    </form>
+    <p class="muted small hidden" id="dlTool"></p>
+    <div class="sub-head">
+      <h3 data-i18n="dl.listTitle"></h3>
+      <button class="icon-btn" id="dlClearDone" type="button" data-i18n-title="dl.clearDone">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M4 12h10M4 18h6M15.5 15.5l5 5M20.5 15.5l-5 5"/></svg>
+      </button>
+    </div>
+    <ul class="folders dl-list" id="dlList"></ul>
   </div>
 </aside>
 <div class="scrim" id="scrim"></div>

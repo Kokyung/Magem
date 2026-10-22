@@ -1463,6 +1463,7 @@ function applyLanguage(code) {
   render();
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
   if (lastStatus) renderStatus(lastStatus);
+  if (dlView) renderDownloads(dlView);
   // once the saved language is known: the main process keeps these for a start without a window
   if (prefsLoaded) window.mmf?.setTrayLabels?.({
     open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice"), indexing: t("tray.indexing"),
@@ -1644,6 +1645,7 @@ let confirmDone = null;
 function confirmDialog(text, yes) {
   closeConfirm(false);
   closeMenu();
+  $("confirmNo").classList.remove("hidden"); // a message's dialog hides it
   $("confirmText").textContent = text;
   $("confirmYes").textContent = yes;
   $("confirmModal").classList.remove("hidden");
@@ -1656,6 +1658,13 @@ function closeConfirm(answer) {
   confirmDone = null;
   $("confirmModal").classList.add("hidden");
   done(answer);
+}
+/** A message with only an OK button, in the same dialog. */
+function alertDialog(text) {
+  const done = confirmDialog(text, t("dl.ok"));
+  $("confirmNo").classList.add("hidden");
+  $("confirmYes").focus();
+  return done;
 }
 $("confirmYes").onclick = () => closeConfirm(true);
 $("confirmNo").onclick = () => closeConfirm(false);
@@ -1954,6 +1963,175 @@ $("clearErrors").onclick = async () => {
 };
 const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.cpu" };
 
+// ---------- saving videos from the web ----------
+// The main process runs yt-dlp, one download at a time, into the indexed folder chosen here; the folder
+// watcher then indexes the finished file. Offline nothing can be downloaded, so a message says so instead.
+let dlView = null;   // the main process's last { tool, jobs }
+let dlKey = "";      // what the list was last built from: rebuilt only when that changes, so clicks aren't swallowed
+async function openDownloads() {
+  let view;
+  try { view = await window.mmf.prepareDownloads(); } catch (e) { return toast(ipcMessage(e), 4000); }
+  if (view?.disabled) return; // turned off in settings (its button is hidden then)
+  if (view?.offline) return alertDialog(t("dl.offline"));
+  const none = !lastStatus?.folders.length;
+  $("dlNoFolder").classList.toggle("hidden", !none);
+  $("dlStart").disabled = none;
+  renderDownloads(view);
+  openDrawer("downloads");
+  $("dlUrls").querySelector("input")?.focus();
+}
+/** One more address field; "+" adds them, and a download leaves just one empty field. */
+function addUrlField(focus) {
+  const input = document.createElement("input");
+  input.type = "text"; // not "url": an empty or wrong field is skipped, not a reason to stop the form
+  input.inputMode = "url";
+  input.spellcheck = false;
+  input.dataset.i18nPlaceholder = "dl.urlPlaceholder";
+  input.placeholder = t("dl.urlPlaceholder");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-btn";
+  remove.textContent = "×";
+  remove.dataset.i18nTitle = "dl.remove";
+  remove.title = t("dl.remove");
+  remove.setAttribute("aria-label", remove.title);
+  remove.onclick = () => {
+    const next = li.nextElementSibling || li.previousElementSibling;
+    li.remove();
+    next?.querySelector("input").focus();
+  };
+  const li = document.createElement("li");
+  li.append(input, remove);
+  $("dlUrls").appendChild(li);
+  if (focus) input.focus();
+}
+function resetUrlFields() {
+  $("dlUrls").replaceChildren();
+  addUrlField(false);
+}
+const isWebAddress = (text) => {
+  try { return ["http:", "https:"].includes(new URL(text).protocol); } catch { return false; }
+};
+/** Where the folder chooser starts: the indexed folder being browsed (the one holding the folder on screen), or the first one. */
+/**
+ * Where the folder chooser starts: the folder chosen last time while it is still inside an indexed folder,
+ * else the indexed folder being browsed (the one holding the folder on screen), or the first one.
+ */
+function downloadStartFolder() {
+  const folders = lastStatus?.folders || [];
+  const rootOf = (at) => at && folders.find((f) => at === f.path || at.startsWith(f.path.replace(/[\\/]$/, "") + (at.includes("\\") ? "\\" : "/")));
+  const last = store.get("mmf.downloadFolder", null);
+  if (typeof last === "string" && rootOf(last)) return last;
+  return (rootOf(browse.path) || folders[0])?.path || "";
+}
+function renderDownloads(view) {
+  if (!view) return;
+  const prev = dlView;
+  dlView = view;
+  for (const j of view.jobs) {
+    if (j.state === "done" && prev && prev.jobs.find((p) => p.id === j.id)?.state !== "done") toast(j.error ? `${t("dl.partial")} · ${downloadNames(j)}` : t("dl.done", { name: downloadNames(j) }), 4000);
+  }
+  const tool = { fetching: "dl.fetching", unavailable: "dl.unavailable", unsupported: "dl.unsupported" }[view.tool];
+  $("dlTool").textContent = tool ? t(tool) : "";
+  $("dlTool").classList.toggle("hidden", !tool);
+  if (view.tool === "unsupported") $("dlStart").disabled = true;
+
+  const key = `${lang}\n${view.jobs.map((j) => [j.id, j.state, j.title, j.files.join("\t"), j.error].join("\t")).join("\n")}`;
+  if (key !== dlKey) {
+    dlKey = key;
+    const list = $("dlList");
+    list.replaceChildren(...view.jobs.slice().reverse().map(downloadItem));
+    if (!view.jobs.length) list.innerHTML = `<li class="muted small">${esc(t("dl.empty"))}</li>`;
+  }
+  for (const j of view.jobs) {
+    const el = $("dlList").querySelector(`[data-id="${j.id}"] .dl-state`);
+    if (el && j.state === "running") el.textContent = downloadProgress(j);
+  }
+}
+/** The saved file; a post's several: how many first (a long name would cut it off), then the first one. */
+const downloadNames = (j) => (j.files.length > 1 ? `${t("dl.count", { n: num(j.files.length) })} · ${j.files[0]}` : j.files[0] || "");
+function downloadProgress(j) {
+  const p = j.progress;
+  return p?.total ? t("dl.running", { pct: Math.min(100, Math.floor((p.done / p.total) * 100)) }) : t("dl.starting");
+}
+function downloadItem(j) {
+  const li = document.createElement("li");
+  li.dataset.id = j.id;
+  li.title = j.url;
+  const state = j.state === "running" ? downloadProgress(j)
+    : j.state === "done" ? (j.error ? `${t("dl.partial")} · ${downloadNames(j)}` : downloadNames(j))
+    : j.state === "failed" ? `${t("dl.failed")}: ${j.error || ""}` // errors stay in English
+    : t(j.state === "queued" ? "dl.queued" : "dl.canceled");
+  li.innerHTML = `<div class="fp"><b>${esc(j.title || j.url)}</b><span class="dl-state">${esc(state)}</span></div><div class="dl-actions"></div>`;
+  if (j.error) li.querySelector(".dl-state").title = j.error; // failed, or done with some of a post's videos missing
+  const actions = li.querySelector(".dl-actions");
+  const button = (cls, text, run) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = text;
+    b.onclick = () => run().catch((err) => toast(ipcMessage(err)));
+    actions.appendChild(b);
+    return b;
+  };
+  if (j.state === "queued" || j.state === "running") {
+    button("ghost", t("dl.cancel"), () => window.mmf.cancelDownload(j.id));
+  } else {
+    if (j.state === "done") {
+      const platform = window.mmf?.platform;
+      button("ghost", t(platform === "darwin" ? "viewer.revealMac" : platform === "win32" ? "viewer.revealWin" : "viewer.revealLinux"),
+        () => window.mmf.revealDownload(j.id));
+    }
+    const remove = button("icon-btn", "×", () => window.mmf.removeDownload(j.id));
+    remove.title = t("dl.remove");
+    remove.setAttribute("aria-label", remove.title);
+  }
+  return li;
+}
+$("dlAddUrl").onclick = () => addUrlField(true);
+$("dlPostFolder").onchange = () => store.set("mmf.downloadPostFolder", $("dlPostFolder").checked);
+$("dlClearDone").onclick = () => window.mmf.clearDoneDownloads().catch((err) => toast(ipcMessage(err)));
+$("dlForm").onsubmit = async (e) => {
+  e.preventDefault();
+  // empty fields and anything that isn't a web address are skipped
+  const urls = [...$("dlUrls").querySelectorAll("input")].map((input) => input.value.trim()).filter(isWebAddress);
+  if (!urls.length) {
+    toast(t("dl.noUrls"));
+    return $("dlUrls").querySelector("input")?.focus();
+  }
+  try {
+    const r = await window.mmf.startDownload(urls, downloadStartFolder(), t("dl.pickFolder"), $("dlPostFolder").checked);
+    if (r?.offline) return alertDialog(t("dl.offline"));
+    if (r?.ids) {
+      store.set("mmf.downloadFolder", r.folder);
+      resetUrlFields();
+    }
+  } catch (err) { toast(ipcMessage(err), 4000); }
+};
+resetUrlFields();
+/** Settings › experimental › "Web media download": the download button is there only while it is on. */
+function applyWebDownload(on) {
+  $("webDownloadCheck").checked = on;
+  $("openDownloads").classList.toggle("hidden", !on || !window.mmf?.prepareDownloads);
+  if (!on && $("downloads").classList.contains("open")) closeDrawers();
+}
+$("webDownloadCheck").onchange = async (e) => {
+  const on = e.target.checked;
+  store.set("mmf.webDownload", on);
+  applyWebDownload(on);
+  // turning it off ends every download and cleans up after them: no second change until that is done
+  e.target.disabled = true;
+  try { await window.mmf.setWebDownload(on); } catch (err) { toast(ipcMessage(err)); } finally { e.target.disabled = false; }
+};
+if (window.mmf?.prepareDownloads) {
+  $("openDownloads").onclick = openDownloads;
+  window.mmf.onDownloads(renderDownloads);
+  // e.g. the window was reopened while a download runs
+  window.mmf.getDownloads().then((view) => { if (view) renderDownloads(view); }, () => {});
+} else {
+  $("experimentalRow").classList.add("hidden"); // the page opened outside the app: nothing to run yt-dlp
+}
+
 (async () => {
   applyLanguage(initialLanguage()); // OS language until the saved settings arrive
   try { Object.assign(prefs, await api("/api/prefs")); } catch { /* start with defaults */ }
@@ -1961,6 +2139,8 @@ const DEVICE_KEYS = { webgpu: "device.webgpu", dml: "device.dml", cpu: "device.c
   applyLanguage(initialLanguage());
   $("themeSelect").value = ["light", "dark"].includes(store.get("mmf.theme")) ? store.get("mmf.theme") : "system";
   $("autoplayCheck").checked = store.get("mmf.videoAutoplay", true) !== false;
+  $("dlPostFolder").checked = store.get("mmf.downloadPostFolder", true) !== false;
+  applyWebDownload(store.get("mmf.webDownload", false) === true);
   applyFolderView(store.get("mmf.folderView") === "grid" ? "grid" : "list"); // a list unless the grid was chosen
   readBrowseSort();
   syncDropdowns();

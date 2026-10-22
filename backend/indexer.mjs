@@ -1097,6 +1097,18 @@ export class Index {
     return root;
   }
 
+  /** A folder downloads may go into: inside an indexed folder, and one the scan and the folder watcher look into. */
+  indexableFolder(dir) {
+    const root = this.browsableRoot(dir);
+    const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));
+    let full = root;
+    for (const part of path.relative(root, dir).split(path.sep).filter(Boolean)) {
+      full = path.join(full, part);
+      if (this._isSkippedDir(full, part, excluded)) throw badRequest("Videos saved in this folder wouldn't be indexed");
+    }
+    return root;
+  }
+
   async browse(dir) {
     const roots = this.db.prepare("SELECT path FROM folders ORDER BY added_at").all().map((r) => r.path);
     const excluded = new Set(this.excluded().map((d) => d.normalize("NFC")));

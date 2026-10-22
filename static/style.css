@@ -74,8 +74,6 @@ input { font: inherit; color: inherit; }
 .brand { user-select: none; display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; }
 .brand img { display: block; }
 .search-wrap { flex: 1; display: flex; align-items: center; gap: 6px; max-width: 806px; margin: 0 auto; min-width: 0; }
-.home-btn { width: 40px; height: 40px; color: var(--text); border: 1px solid var(--border); background: var(--surface); }
-.home-btn:hover { border-color: var(--muted); }
 .search {
   position: relative;
   flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0;
@@ -100,6 +98,7 @@ input { font: inherit; color: inherit; }
   border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 7px 14px;
 }
 .ghost:hover { border-color: var(--muted); }
+.ghost.icon-only { padding: 8px; } /* header buttons: the icon alone (the name is its tooltip) */
 .primary { border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 10px 20px; font-weight: 600; }
 .primary:hover { background: var(--accent-hover); }
 .wide { width: 100%; }
@@ -367,6 +366,27 @@ main { padding: 8px 24px 60px; }
 .path-form { display: flex; gap: 8px; }
 .path-form input { flex: 1; min-width: 0; border: 1px solid var(--border); background: var(--bg); border-radius: 999px; padding: 7px 14px; outline: 0; }
 .path-form input:focus { border-color: var(--accent); }
+.dl-form { display: flex; flex-direction: column; gap: 12px; }
+/* the addresses to download: one field each, "+" adds another; many of them scroll */
+/* outlined and spaced like the indexed folder list (.folder-grid) */
+.dl-urls {
+  list-style: none; margin: 0; display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto;
+  padding: 8px; border: 1px solid var(--border); border-radius: 12px;
+}
+.dl-urls li { display: flex; align-items: center; gap: 4px; }
+/* the only field can't be removed */
+.dl-urls li:only-child .icon-btn { display: none; }
+.dl-urls .icon-btn { width: 30px; height: 30px; font-size: 18px; }
+.dl-urls input { flex: 1; min-width: 0; box-sizing: border-box; border: 1px solid var(--border); background: var(--bg); color: inherit; border-radius: 999px; padding: 7px 14px; outline: 0; font: inherit; font-size: 14px; }
+.dl-urls input:focus { border-color: var(--accent); }
+.dl-form .sub-head { margin-top: 0; }
+.dl-form .primary:disabled { opacity: .5; cursor: default; }
+/* scrolls on its own, so a long list doesn't push the rest of the drawer away; spaced like the indexed folder list
+   (.folders.dl-list: the .folders rule below would otherwise take the padding away) */
+.folders.dl-list { height: 320px; flex-shrink: 0; overflow-y: auto; padding: 8px; border: 1px solid var(--border); border-radius: 12px; }
+.dl-list .dl-actions { display: flex; gap: 4px; flex: none; }
+.dl-list .dl-actions .ghost { padding: 4px 10px; font-size: 12px; }
+.dl-list .dl-actions .icon-btn { width: 30px; height: 30px; font-size: 18px; }
 .folders { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .folders li { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
 .folders .fp { flex: 1; min-width: 0; }

@@ -25,4 +25,13 @@ contextBridge.exposeInMainWorld("mmf", {
   getIndexJob: () => ipcRenderer.invoke("get-index-job"),
   revealBackup: () => ipcRenderer.invoke("reveal-backup"),
   onIndexJob: (callback) => ipcRenderer.on("index-job", (_e, job) => callback(job)),
+  getDownloads: () => ipcRenderer.invoke("get-downloads"),
+  prepareDownloads: () => ipcRenderer.invoke("prepare-downloads"),
+  startDownload: (urls, defaultDir, title, postFolder) => ipcRenderer.invoke("start-download", Array.isArray(urls) ? urls.map(String) : [], String(defaultDir || ""), String(title || ""), postFolder !== false),
+  removeDownload: (id) => ipcRenderer.invoke("remove-download", Number(id)),
+  clearDoneDownloads: () => ipcRenderer.invoke("clear-done-downloads"),
+  setWebDownload: (on) => ipcRenderer.invoke("set-web-download", on === true),
+  cancelDownload: (id) => ipcRenderer.invoke("cancel-download", Number(id)),
+  revealDownload: (id) => ipcRenderer.invoke("reveal-download", Number(id)),
+  onDownloads: (callback) => ipcRenderer.on("downloads", (_e, view) => callback(view)),
 });

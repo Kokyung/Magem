@@ -1,10 +1,12 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerMonitor, session, shell, Tray, utilityProcess } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyStagedRestore, BACKUP_EXT, cleanupLeftovers, confirmRestore, createBackup, rollbackRestore, stageRestore } from "./index-backup.mjs";
+import { downloadUrls, VideoDownloads } from "./video-download.mjs";
 
 const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, "models") : path.join(APP_ROOT, "models");
@@ -12,6 +14,8 @@ const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, "models") :
 const TOKEN = (!app.isPackaged && process.env.MMF_DEV_TOKEN) || crypto.randomBytes(24).toString("hex");
 
 let backend = null;
+let downloads = null; // VideoDownloads, once the engine is up
+let webDownload = false; // settings › experimental › "Web media download" (mmf.webDownload); off by default
 let baseUrl = null;
 let win = null;
 let quitting = false;
@@ -116,6 +120,24 @@ function sendConditions() {
   backend.postMessage({ type: "conditions", ...conditions() });
 }
 
+/** Windows ARM64 builds bundle their own ffmpeg (see scripts/after-pack.cjs); null elsewhere. */
+function bundledFfmpeg() {
+  const p = path.join(process.resourcesPath, "ffmpeg", "ffmpeg.exe");
+  return app.isPackaged && fs.existsSync(p) ? p : null;
+}
+
+/** The ffmpeg the engine uses too: the bundled one, or ffmpeg-static's (unpacked from the asar archive). */
+function ffmpegPath() {
+  const bundled = bundledFfmpeg();
+  if (bundled) return bundled;
+  try {
+    const p = createRequire(import.meta.url)("ffmpeg-static")?.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+    return p && fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function startBackend() {
   const dataDir = app.getPath("userData");
   const logDir = path.join(dataDir, "logs");
@@ -127,9 +149,7 @@ function startBackend() {
     // from the start, so a launch on battery doesn't begin its first run before hearing about it
     MMF_CONDITIONS: JSON.stringify(conditions()) };
   delete env.ELECTRON_RUN_AS_NODE;
-  // Windows ARM64 builds bundle their own ffmpeg (see scripts/after-pack.cjs)
-  const bundledFfmpeg = path.join(process.resourcesPath, "ffmpeg", "ffmpeg.exe");
-  if (app.isPackaged && fs.existsSync(bundledFfmpeg)) env.MMF_FFMPEG = bundledFfmpeg;
+  if (bundledFfmpeg()) env.MMF_FFMPEG = bundledFfmpeg();
 
   backend = utilityProcess.fork(path.join(APP_ROOT, "backend", "main.mjs"), [], {
     env, stdio: "pipe", serviceName: "Magem Engine",
@@ -259,6 +279,7 @@ async function applySavedPrefs() {
     const prefs = await res.json();
     if (THEMES.has(prefs["mmf.theme"])) nativeTheme.themeSource = prefs["mmf.theme"];
     runInBackground = prefs["mmf.background"] !== false;
+    webDownload = prefs["mmf.webDownload"] === true;
     trayNoticeShown = prefs["mmf.trayNotice"] === true;
     applyTrayLabels(prefs["mmf.trayLabels"]);
   } catch { /* defaults */ }
@@ -588,6 +609,58 @@ async function confirmQuitDuringJob() {
     showWindow(); // the window was closed on the way to quitting: bring it back to show the progress
   }
 }
+// ---------- saving videos from the web (yt-dlp) ----------
+/** Downloads go only into indexed folders (or folders inside them that get indexed): the engine checks the one chosen. */
+async function checkDownloadFolder(dir) {
+  try {
+    if (typeof dir !== "string" || !dir) throw new Error("no folder");
+    await engine("/api/download_folder", { path: dir });
+    if (!fs.statSync(dir).isDirectory()) throw new Error("not a folder");
+  } catch {
+    throw new Error("Choose an indexed folder, or a folder inside one that gets indexed (not hidden or excluded)");
+  }
+}
+function sendDownloads(view) {
+  if (win && !win.isDestroyed()) win.webContents.send("downloads", view);
+}
+ipcMain.handle("get-downloads", () => downloads?.view() ?? null);
+// the panel was opened: fetch yt-dlp now if it isn't here yet (or look for a newer one), without waiting.
+// Offline nothing can be downloaded anyway, so the page says so instead of opening the panel.
+ipcMain.handle("prepare-downloads", () => {
+  if (!webDownload) return { disabled: true };
+  if (!net.isOnline()) return { offline: true };
+  downloads?.prepare();
+  return downloads?.view() ?? null;
+});
+// the addresses are checked before the folder chooser opens; it starts in the folder the page suggests
+// (only ever a starting point: the chosen folder is checked like any other). The title arrives translated.
+ipcMain.handle("start-download", async (_e, urls, defaultDir, title, postFolder) => {
+  if (!downloads) throw new Error("The app is still starting");
+  if (!webDownload) throw new Error("Web media download is turned off in Settings");
+  if (!net.isOnline()) return { offline: true };
+  downloadUrls(urls);
+  const r = await dialog.showOpenDialog(win, {
+    title: String(title).slice(0, 200),
+    ...(typeof defaultDir === "string" && defaultDir ? { defaultPath: defaultDir } : {}),
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (r.canceled || !r.filePaths[0]) return { canceled: true };
+  return { ids: await downloads.add(urls, r.filePaths[0], postFolder !== false), folder: r.filePaths[0] };
+});
+ipcMain.handle("remove-download", (_e, id) => downloads?.remove(id));
+ipcMain.handle("clear-done-downloads", () => downloads?.clearDone());
+// turning it off ends every download and cleans up after them; resolves once that is done
+ipcMain.handle("set-web-download", async (_e, on) => {
+  webDownload = on === true;
+  if (webDownload) await downloads?.enable();
+  else await downloads?.disable();
+});
+ipcMain.handle("cancel-download", (_e, id) => downloads?.cancel(id));
+ipcMain.handle("reveal-download", (_e, id) => {
+  const file = downloads?.file(id);
+  if (file && fs.existsSync(file)) shell.showItemInFolder(file);
+});
+
 ipcMain.handle("open-file", async (_e, id) => {
   const err = await shell.openPath(await indexedPath(id));
   if (err) throw new Error(err);
@@ -671,6 +744,10 @@ app.whenReady().then(async () => {
     baseUrl = `http://127.0.0.1:${port}`;
     await setAuthCookie();
     await applySavedPrefs();
+    downloads = new VideoDownloads({
+      dir: path.join(dataDir, "yt-dlp"), ffmpeg: ffmpegPath(), checkFolder: checkDownloadFolder, onChange: sendDownloads, log: logMain,
+      enabled: webDownload,
+    });
     if (TRAY_PLATFORM) createTray();
     updateDockMenu();
     if (START_HIDDEN) {
@@ -707,5 +784,6 @@ app.on("before-quit", (e) => {
     return;
   }
   quitting = true;
+  downloads?.stop();
   backend?.kill();
 });
