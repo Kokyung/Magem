@@ -23,6 +23,7 @@ with them (in `node_modules/<package>/` and the model folders) and apply to thos
 | [libheif-js](https://github.com/catdad-experiments/libheif-js) | LGPL-3.0 | Shipped as a separate, unmodified module |
 | [FFmpeg](https://ffmpeg.org/) via [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) | **GPL-3.0-or-later** (see below) | Video frames and audio (macOS, Windows x64, Linux) |
 | [FFmpeg](https://ffmpeg.org/) build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) | **LGPL-3.0** (see below) | Video frames and audio (Windows ARM64 only) |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | The Unlicense | Not in the installers: downloaded on first use of the experimental web media download (see below) |
 
 ## FFmpeg (GPL) — macOS, Windows x64 and Linux installers
 
@@ -52,6 +53,18 @@ unmodified LGPL build (no GPL components), which is all the app needs since it o
 - License text: `resources/ffmpeg/LICENSE.txt` (GNU LGPL v3) in the installed app
 - FFmpeg source code: <https://github.com/FFmpeg/FFmpeg/commit/46d899d7a0> (release/8.1 branch);
   build scripts: <https://github.com/BtbN/FFmpeg-Builds>
+
+## yt-dlp — downloaded on first use (experimental "Web media download")
+
+yt-dlp is not part of the installers. Only when the experimental "Web media download" setting is
+turned on and its panel is opened, the app downloads the official standalone yt-dlp build for the
+platform from <https://github.com/yt-dlp/yt-dlp/releases> into its data folder (`yt-dlp/`), checks
+it against that release's `SHA2-256SUMS`, and looks for a newer one at most once a day. Magem runs it
+unmodified, as a separate program.
+
+- License: The Unlicense (yt-dlp's own code). The standalone builds also contain Python and other
+  libraries under their own licenses.
+- Joining separate video and audio streams uses the app's own FFmpeg (above).
 
 ## All bundled production packages
 
