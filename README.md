@@ -62,7 +62,8 @@
 | 플랫폼 | 설치 파일 | 상태 |
 |---|---|---|
 | macOS (Apple Silicon) | `Magem-<버전>-mac-arm64.dmg` | 빌드·실행 확인 완료 |
-| Windows (x64 / ARM64) | `Magem-<버전>-win.exe` | 빌드·실행 확인 완료 |
+| Windows (x64) | `Magem-<버전>-win-x64.exe` | 빌드·실행 확인 완료 |
+| Windows (ARM64) | `Magem-<버전>-win-arm64.exe` | 빌드·실행 확인 완료 |
 | Linux (x64) | `Magem-<버전>-linux-x86_64.AppImage`, `Magem-<버전>-linux-amd64.deb` | 빌드 설정만 있음 (Linux에서 빌드 필요, 미검증) |
 
 - Intel Mac은 지원하지 않습니다. onnxruntime이 Intel Mac용 네이티브 바이너리를 제공하지 않기 때문입니다.
@@ -146,9 +147,19 @@ Node.js 22.12 이상이 필요합니다.
 npm install          # 의존성 설치 + 모델 다운로드(약 1.2GB)
 npm start            # 개발 모드로 실행
 npm run dist:mac     # macOS DMG  → dist/
-npm run dist:win     # Windows 설치 파일 x64·ARM64 (Windows에서 실행, ARM64용 ffmpeg를 먼저 내려받음)
+npm run dist:win:x64   # Windows x64 설치 파일 (Windows에서 실행)
+npm run dist:win:arm64 # Windows ARM64 설치 파일 (Windows에서 실행, ARM64용 ffmpeg를 먼저 내려받음)
+npm run dist:win       # 위 두 설치 파일을 차례로 빌드
 npm run dist:linux   # AppImage / deb (Linux에서 실행)
 npm run make-icons   # build/icon-source.png에서 앱 아이콘과 타이틀 로고(static/logo.png)를 다시 생성
+```
+
+Windows 설치 파일은 **Windows에서** 빌드해야 합니다. sharp·ONNX Runtime·ffmpeg는 OS와 CPU마다 다른 바이너리를 쓰는데, `npm install`은 빌드하는 컴퓨터용만 설치합니다. 그래서 macOS에서 만든 Windows 설치 파일에는 macOS용 바이너리가 들어가 동작하지 않습니다.
+
+x64 PC에서 ARM64 설치 파일을 만들 때는 먼저 ARM64용 sharp를 설치하세요(ONNX Runtime은 두 CPU용이 함께 설치되고, ffmpeg는 `dist:win:arm64`가 내려받습니다).
+
+```bash
+npm install --no-save --os=win32 --cpu=arm64 sharp
 ```
 
 ### 모델 받기 (EmbeddingGemma 2)

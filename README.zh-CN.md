@@ -62,7 +62,8 @@
 | 平台 | 安装文件 | 状态 |
 |---|---|---|
 | macOS（Apple Silicon） | `Magem-<版本>-mac-arm64.dmg` | 已构建并验证运行 |
-| Windows（x64 / ARM64） | `Magem-<版本>-win.exe` | 已构建并验证运行 |
+| Windows（x64） | `Magem-<版本>-win-x64.exe` | 已构建并验证运行 |
+| Windows（ARM64） | `Magem-<版本>-win-arm64.exe` | 已构建并验证运行 |
 | Linux（x64） | `Magem-<版本>-linux-x86_64.AppImage`、`Magem-<版本>-linux-amd64.deb` | 仅有构建配置（需在 Linux 上构建，未验证） |
 
 - 不支持 Intel Mac，因为 onnxruntime 不提供 Intel Mac 的原生二进制文件。
@@ -146,9 +147,19 @@ models/                打包进应用的模型文件（npm install 时自动下
 npm install          # 安装依赖 + 下载模型（约 1.2GB）
 npm start            # 以开发模式运行
 npm run dist:mac     # macOS DMG  → dist/
-npm run dist:win     # Windows 安装程序 x64、ARM64（在 Windows 上运行，会先下载 ARM64 版 ffmpeg）
+npm run dist:win:x64   # Windows x64 安装程序（在 Windows 上运行）
+npm run dist:win:arm64 # Windows ARM64 安装程序（在 Windows 上运行，会先下载 ARM64 版 ffmpeg）
+npm run dist:win       # 依次构建以上两个安装程序
 npm run dist:linux   # AppImage / deb（在 Linux 上运行）
 npm run make-icons   # 从 build/icon-source.png 重新生成应用图标和标题 Logo（static/logo.png）
+```
+
+Windows 安装程序需要**在 Windows 上**构建。sharp、ONNX Runtime 和 ffmpeg 针对不同的操作系统和 CPU 使用不同的二进制文件，而 `npm install` 只安装当前电脑所需的版本，因此在 macOS 上生成的 Windows 安装程序会包含 macOS 二进制文件，无法运行。
+
+在 x64 电脑上构建 ARM64 安装程序时，请先安装 ARM64 版 sharp（ONNX Runtime 已包含两种 CPU 的版本，ffmpeg 由 `dist:win:arm64` 下载）：
+
+```bash
+npm install --no-save --os=win32 --cpu=arm64 sharp
 ```
 
 ### 获取模型（EmbeddingGemma 2）

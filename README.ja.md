@@ -62,7 +62,8 @@
 | プラットフォーム | インストーラー | 状態 |
 |---|---|---|
 | macOS（Apple Silicon） | `Magem-<バージョン>-mac-arm64.dmg` | ビルド・動作確認済み |
-| Windows（x64 / ARM64） | `Magem-<バージョン>-win.exe` | ビルド・動作確認済み |
+| Windows（x64） | `Magem-<バージョン>-win-x64.exe` | ビルド・動作確認済み |
+| Windows（ARM64） | `Magem-<バージョン>-win-arm64.exe` | ビルド・動作確認済み |
 | Linux（x64） | `Magem-<バージョン>-linux-x86_64.AppImage`、`Magem-<バージョン>-linux-amd64.deb` | ビルド設定のみ（Linux でのビルドが必要、未検証） |
 
 - Intel Mac には対応していません。onnxruntime が Intel Mac 向けのネイティブバイナリを提供していないためです。
@@ -146,9 +147,19 @@ Node.js 22.12 以上が必要です。
 npm install          # 依存関係のインストール + モデルのダウンロード（約 1.2GB）
 npm start            # 開発モードで実行
 npm run dist:mac     # macOS DMG  → dist/
-npm run dist:win     # Windows インストーラー x64・ARM64（Windows で実行、ARM64 用 ffmpeg を先にダウンロード）
+npm run dist:win:x64   # Windows x64 インストーラー（Windows で実行）
+npm run dist:win:arm64 # Windows ARM64 インストーラー（Windows で実行、ARM64 用 ffmpeg を先にダウンロード）
+npm run dist:win       # 上の 2 つを順にビルド
 npm run dist:linux   # AppImage / deb（Linux で実行）
 npm run make-icons   # build/icon-source.png からアプリアイコンとタイトルロゴ（static/logo.png）を再生成
+```
+
+Windows インストーラーは **Windows で**ビルドしてください。sharp・ONNX Runtime・ffmpeg は OS と CPU ごとに別のバイナリを使いますが、`npm install` はビルドするコンピューター用のものしか入れません。そのため macOS で作った Windows インストーラーには macOS 用のバイナリが入り、動作しません。
+
+x64 PC で ARM64 インストーラーを作るときは、先に ARM64 用 sharp をインストールしてください（ONNX Runtime は両 CPU 用が含まれ、ffmpeg は `dist:win:arm64` がダウンロードします）。
+
+```bash
+npm install --no-save --os=win32 --cpu=arm64 sharp
 ```
 
 ### モデルの取得（EmbeddingGemma 2）

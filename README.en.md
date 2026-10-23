@@ -65,7 +65,8 @@
 | Platform | Installer | Status |
 |---|---|---|
 | macOS (Apple Silicon) | `Magem-<version>-mac-arm64.dmg` | Built and tested |
-| Windows (x64 / ARM64) | `Magem-<version>-win.exe` | Built and tested |
+| Windows (x64) | `Magem-<version>-win-x64.exe` | Built and tested |
+| Windows (ARM64) | `Magem-<version>-win-arm64.exe` | Built and tested |
 | Linux (x64) | `Magem-<version>-linux-x86_64.AppImage`, `Magem-<version>-linux-amd64.deb` | Build config only (must be built on Linux, untested) |
 
 - Intel Macs aren't supported, because onnxruntime doesn't ship native binaries for Intel Macs.
@@ -149,9 +150,19 @@ Requires Node.js 22.12 or later.
 npm install          # Install dependencies + download the model (about 1.2 GB)
 npm start            # Run in development mode
 npm run dist:mac     # macOS DMG  → dist/
-npm run dist:win     # Windows installer for x64 and ARM64 (run on Windows; downloads the ARM64 ffmpeg first)
+npm run dist:win:x64   # Windows x64 installer (run on Windows)
+npm run dist:win:arm64 # Windows ARM64 installer (run on Windows; downloads the ARM64 ffmpeg first)
+npm run dist:win       # Both installers above, one after the other
 npm run dist:linux   # AppImage / deb (run on Linux)
 npm run make-icons   # Regenerate the app icon and title logo (static/logo.png) from build/icon-source.png
+```
+
+Build the Windows installers **on Windows**. sharp, ONNX Runtime and ffmpeg use a different binary for each OS and CPU, and `npm install` only installs the ones for the computer it runs on, so a Windows installer made on macOS contains macOS binaries and doesn't work.
+
+To build the ARM64 installer on an x64 PC, first install the ARM64 sharp (ONNX Runtime comes with both CPUs, and `dist:win:arm64` downloads the ffmpeg):
+
+```bash
+npm install --no-save --os=win32 --cpu=arm64 sharp
 ```
 
 ### Getting the model (EmbeddingGemma 2)
