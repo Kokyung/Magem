@@ -104,25 +104,65 @@ input { font: inherit; color: inherit; }
 .wide { width: 100%; }
 
 /* toolbar */
-/* two parts: the filters, which wrap onto more rows when narrow, and the status with ▶/⏸, which always stays
-   on the first row. fitToolbar() (app.js) sizes the filters to what fits beside the status on that row, so the
-   status text gets all the room left there */
+/* the filters and, at the right end of the first row (always), the ▶/⏸ button with its short status word.
+   When room runs out, that word gives way first (cut short with …: the details are under the button), then
+   the filters wrap among themselves. */
 .toolbar { display: flex; align-items: flex-start; gap: 14px; padding: 12px 24px; }
-.toolbar-filters { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+/* never squeezed (the slightest squeeze would already wrap them): they wrap only past the room the button needs
+   (its 38px least width + the 14px gap) */
+.toolbar-filters { flex: 0 0 auto; max-width: calc(100% - 52px); display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
 .toolbar-filters > * { flex: none; }
 .seg { display: inline-flex; background: var(--surface-2); border-radius: 999px; padding: 3px; }
 .seg button { border: 0; background: transparent; padding: 5px 14px; border-radius: 999px; color: var(--muted); }
 .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.1); }
 .toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; cursor: pointer; }
-/* capture-date range: two native date fields, styled like the other controls */
-.date-filter { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
-.date-filter input[type="date"] {
-  font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border);
-  border-radius: 999px; padding: 4px 10px; outline: 0; color-scheme: inherit;
+/* capture-date range: one button (the range, once chosen) opening a calendar of our own under it */
+.date-filter { position: relative; display: inline-flex; align-items: center; gap: 4px; }
+.date-btn {
+  display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 13px;
 }
-.date-filter input[type="date"]:hover, .date-filter input[type="date"]:focus { border-color: var(--muted); }
-.date-filter input[type="date"]:invalid, .date-filter input[type="date"]:not(:focus):placeholder-shown { color: var(--muted); }
+.date-btn:not(.on) { width: 32px; padding: 0; justify-content: center; } /* nothing chosen: the icon alone */
+.date-btn:not(.on) span { display: none; }
+.date-btn.on { color: var(--text); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.date-btn:hover, .date-btn[aria-expanded="true"] { border-color: var(--muted); color: var(--text); }
 .date-clear { width: 26px; height: 26px; }
+.date-pop {
+  position: absolute; top: calc(100% + 6px); inset-inline-start: 0; z-index: 40; display: flex; gap: 12px; padding: 12px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+}
+.date-presets { display: flex; flex-direction: column; gap: 2px; padding-inline-end: 12px; border-inline-end: 1px solid var(--border); }
+.date-presets button { border: 0; background: none; text-align: start; white-space: nowrap; font-size: 13px; padding: 6px 10px; border-radius: 8px; }
+.date-presets button:hover { background: var(--surface-2); }
+.date-presets button[aria-pressed="true"] { background: var(--surface-2); color: var(--accent); font-weight: 600; }
+.date-cal { width: 266px; display: flex; flex-direction: column; gap: 8px; }
+.date-head { display: flex; align-items: center; gap: 4px; }
+.date-head .icon-btn { width: 30px; height: 30px; font-size: 20px; }
+.date-head .icon-btn:disabled { opacity: .3; cursor: default; }
+.date-ym { display: flex; gap: 4px; margin-inline: auto; }
+.date-ym .dropdown-btn { font-size: 13px; padding-block: 3px; padding-inline: 10px 26px; }
+.date-grid { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 2px; }
+.date-grid .wd { text-align: center; font-size: 11px; color: var(--muted); padding-bottom: 4px; }
+.date-grid button {
+  position: relative; height: 34px; border: 0; border-radius: 0; background: none; color: var(--text);
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.date-grid button:hover:not(:disabled) { background: var(--surface-2); }
+.date-grid button.out { color: var(--muted); }
+.date-grid button:disabled { opacity: .3; cursor: default; }
+/* the range: a tinted band, rounded at its ends; the picked days themselves filled */
+.date-grid button.in { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.date-grid button.lo { border-start-start-radius: 999px; border-end-start-radius: 999px; }
+.date-grid button.hi { border-start-end-radius: 999px; border-end-end-radius: 999px; }
+.date-grid button.edge { background: var(--accent); color: var(--accent-ink); font-weight: 600; border-radius: 999px; }
+.date-grid button.today:not(.edge)::after {
+  content: ""; position: absolute; bottom: 4px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--accent);
+}
+.date-grid button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.date-summary { margin: 0; min-height: 1.5em; font-size: 12px; color: var(--muted); }
+.date-foot { display: flex; align-items: center; gap: 6px; }
+.date-foot-gap { flex: 1; }
+.date-foot button { padding: 6px 12px; font-size: 13px; }
 .toggle input { accent-color: var(--accent); }
 .select-field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
 /* dropdowns: a button standing in for each <select> (see enhanceSelect in app.js), with an arrow that has
@@ -196,13 +236,32 @@ input { font: inherit; color: inherit; }
   border: 2px solid color-mix(in srgb, var(--tone) 20%, transparent); border-top-color: var(--tone);
   animation: spin .8s linear infinite; pointer-events: none;
 }
-/* the status text and the ▶/⏸ button move together: the text gives way (ending in "…") before the button
-   would be pushed onto a line of its own */
-.status-group {
-  flex: 1 1 0; min-width: 140px; min-height: 36px;
+/* the ▶/⏸ button with the indexing progress as a ring around it, and next to it only a short word (the
+   percentage, or a state worth noticing). Everything else opens below it on hover or keyboard focus. */
+.status-bar {
+  position: relative; flex: 0 1 auto; min-width: 38px; margin-inline-start: auto; min-height: 36px;
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
 }
-.status { min-width: 0; color: var(--muted); font-size: 13px; text-align: end; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-short {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.index-toggle .ring { display: none; position: absolute; inset: -1px; width: 30px; height: 30px; transform: rotate(-90deg); pointer-events: none; }
+.index-toggle.running .ring { display: block; }
+.index-toggle .ring circle {
+  fill: none; stroke: var(--tone); stroke-width: 2; stroke-linecap: round;
+  stroke-dasharray: var(--pct, 0) 100; transition: stroke-dasharray .4s;
+}
+.status-pop {
+  position: absolute; top: 100%; inset-inline-end: 0; z-index: 25; margin-top: 6px;
+  min-width: 240px; max-width: min(380px, calc(100vw - 32px)); padding: 10px 14px; border-radius: 12px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+  color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere;
+  visibility: hidden; opacity: 0; transition: opacity .15s, visibility .15s;
+}
+.status-pop::before { content: ""; position: absolute; inset-inline: 0; top: -8px; height: 8px; } /* keeps the hover on the way down */
+.status-bar:hover .status-pop, .status-bar:focus-within .status-pop { visibility: visible; opacity: 1; }
+.status-pop .status-file { color: var(--muted); font-size: 12px; }
 .progress { height: 3px; background: var(--surface-2); margin: 0 24px; border-radius: 3px; overflow: hidden; }
 .progress div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--violet)); transition: width .4s; }
 

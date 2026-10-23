@@ -318,28 +318,6 @@ function skeletonGrid(n) {
   return grid;
 }
 
-// The toolbar's filters take, on the first row, only what fits beside the status (at least STATUS_MIN wide);
-// the rest of them wrap below, and the status text gets all the room left on that row.
-const STATUS_MIN = 140;
-function fitToolbar() {
-  const bar = document.querySelector(".toolbar");
-  const filters = document.querySelector(".toolbar-filters");
-  const cs = getComputedStyle(bar);
-  const room = bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - parseFloat(cs.columnGap) - STATUS_MIN;
-  const gap = parseFloat(getComputedStyle(filters).columnGap) || 0;
-  const widths = [...filters.children].filter((el) => el.offsetParent !== null).map((el) => el.getBoundingClientRect().width);
-  let row = 0;
-  for (const w of widths) {
-    const next = row ? row + gap + w : w;
-    if (row && next > room) break;
-    row = next;
-  }
-  filters.style.flexBasis = `${Math.ceil(Math.max(row, ...widths, 0))}px`;
-}
-const toolbarWatch = new ResizeObserver(() => fitToolbar());
-toolbarWatch.observe(document.querySelector(".toolbar"));
-for (const el of document.querySelector(".toolbar-filters").children) toolbarWatch.observe(el); // e.g. a language change
-
 // the results bar (count, select-all) sticks under the header, whose height changes when it wraps
 new ResizeObserver(([entry]) => {
   document.documentElement.style.setProperty("--top-height", `${entry.target.offsetHeight}px`);
@@ -1289,26 +1267,236 @@ $("homeBtn").onclick = goHome;
 // ---------- capture-date range ----------
 // The chosen days are local dates: the range runs from the start of the first to the end of the last.
 const startOfDay = (value) => (value ? new Date(`${value}T00:00`).getTime() : null);
-/** Local midnight after the given day (a calendar day, so a daylight-saving change doesn't shift it). */
+/**
+ * Local midnight after the given day, made from the date's parts: where a clock change skips midnight
+ * itself, the day's start comes out as 01:00, and adding a day to that would carry the hour along.
+ */
 function dayAfter(value) {
-  const d = new Date(`${value}T00:00`);
-  d.setDate(d.getDate() + 1);
-  return d.getTime();
+  const [y, m, d] = value.split("-").map(Number);
+  return new Date(y, m - 1, d + 1).getTime();
 }
-function readDates() {
-  let [from, to] = [$("dateFrom").value, $("dateTo").value];
-  if (from && to && from > to) { [from, to] = [to, from]; $("dateFrom").value = from; $("dateTo").value = to; }
-  state.after = startOfDay(from);
-  state.before = to ? dayAfter(to) : null; // the whole last day
+// The calendar behind the date button: a first click picks the first day, a second one the last (in either
+// order), a preset picks both. Nothing changes until "Apply"; the filter itself is state.after / state.before.
+const FIRST_YEAR = 1990; // capture dates before this are ignored by the engine too
+const pad2 = (n) => String(n).padStart(2, "0");
+const isoDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const parseDay = (day) => new Date(`${day}T00:00`);
+const addDays = (day, n) => { const d = parseDay(day); d.setDate(d.getDate() + n); return isoDay(d); };
+const cal = { open: false, from: null, to: null, hover: null, view: null }; // days as "YYYY-MM-DD"; view: the month shown
+// the applied range as days: the last one is read 12 hours before state.before (a midnight a clock change
+// skipped comes out as 01:00, so just before it can already be the next day)
+const appliedFrom = () => (state.after != null ? isoDay(new Date(state.after)) : null);
+const appliedTo = () => (state.before != null ? isoDay(new Date(state.before - 12 * 3600 * 1000)) : null);
+const DATE_PRESETS = {
+  "date.today": (today) => [today, today],
+  "date.last7": (today) => [addDays(today, -6), today],
+  "date.last30": (today) => [addDays(today, -29), today],
+  "date.thisYear": (today) => [`${today.slice(0, 4)}-01-01`, today],
+  "date.lastYear": (today) => [`${+today.slice(0, 4) - 1}-01-01`, `${+today.slice(0, 4) - 1}-12-31`],
+};
+
+function formatDays(a, b) {
+  const f = new Intl.DateTimeFormat(lang, { year: "numeric", month: "short", day: "numeric" });
+  return a === b ? f.format(parseDay(a)) : f.formatRange(parseDay(a), parseDay(b));
+}
+/** The applied range on the button (the icon alone when there is none). */
+function renderDateButton() {
+  const from = appliedFrom(), to = appliedTo();
+  $("dateLabel").textContent = from || to ? formatDays(from ?? to, to ?? from) : "";
+  $("dateBtn").classList.toggle("on", hasDates());
   $("dateClear").classList.toggle("hidden", !hasDates());
 }
 function clearDates() {
-  $("dateFrom").value = "";
-  $("dateTo").value = "";
-  readDates();
+  state.after = state.before = null;
+  renderDateButton();
+  closeCalendar();
 }
-for (const id of ["dateFrom", "dateTo"]) $(id).onchange = () => { readDates(); inputSeq++; runSearch(); };
 $("dateClear").onclick = () => { clearDates(); inputSeq++; runSearch(); };
+
+/** The week's first day as the language has it (0 = Sunday). */
+function firstWeekday() {
+  try {
+    const locale = new Intl.Locale(lang);
+    return ((locale.getWeekInfo?.() ?? locale.weekInfo)?.firstDay ?? 7) % 7;
+  } catch { return 0; }
+}
+function openCalendar() {
+  closeMenu();
+  cal.from = appliedFrom();
+  cal.to = appliedTo();
+  cal.hover = null;
+  const shown = parseDay(cal.to ?? cal.from ?? isoDay(new Date()));
+  cal.view = new Date(shown.getFullYear(), shown.getMonth(), 1);
+  cal.open = true;
+  $("datePop").classList.remove("hidden");
+  $("dateBtn").setAttribute("aria-expanded", "true");
+  renderCalendar();
+  placeCalendar();
+  ($("dateGrid").querySelector(".edge, .today") || $("dateGrid").querySelector("button:not(:disabled)"))?.focus();
+}
+function closeCalendar(focusButton = false) {
+  if (!cal.open) return;
+  cal.open = false;
+  closeDropdown();
+  $("datePop").classList.add("hidden");
+  $("dateBtn").setAttribute("aria-expanded", "false");
+  if (focusButton) $("dateBtn").focus();
+}
+function renderCalendar() {
+  const today = isoDay(new Date());
+  // the year and month lists, and the arrows (no month before FIRST_YEAR, none after this one)
+  const year = $("dateYear"), month = $("dateMonth");
+  const thisYear = new Date().getFullYear();
+  if (year.options.length !== thisYear - FIRST_YEAR + 1) {
+    year.replaceChildren(...Array.from({ length: thisYear - FIRST_YEAR + 1 }, (_, i) => new Option(String(thisYear - i), String(thisYear - i))));
+  }
+  const monthName = new Intl.DateTimeFormat(lang, { month: "long" });
+  month.replaceChildren(...Array.from({ length: 12 }, (_, m) => new Option(monthName.format(new Date(2000, m, 1)), String(m))));
+  year.value = String(cal.view.getFullYear());
+  month.value = String(cal.view.getMonth());
+  syncDropdowns();
+  $("datePrev").disabled = cal.view.getFullYear() === FIRST_YEAR && cal.view.getMonth() === 0;
+  $("dateNext").disabled = cal.view.getFullYear() === thisYear && cal.view.getMonth() === new Date().getMonth();
+
+  const first = firstWeekday();
+  const weekdays = (width) => Array.from({ length: 7 }, (_, i) => // Jan 1 2023 was a Sunday
+    new Intl.DateTimeFormat(lang, { weekday: width }).format(new Date(2023, 0, 1 + ((first + i) % 7))));
+  let names = weekdays("short");
+  if (names.some((name) => name.length > 4)) names = weekdays("narrow"); // e.g. Arabic: whole words, wider than a day
+  const cells = names.map((name) => {
+    const el = document.createElement("span");
+    el.className = "wd";
+    el.setAttribute("role", "columnheader");
+    el.textContent = name;
+    return el;
+  });
+  const start = new Date(cal.view);
+  start.setDate(1 - ((start.getDay() - first + 7) % 7));
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    const day = isoDay(d);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.day = day;
+    b.textContent = d.getDate();
+    b.setAttribute("aria-label", new Intl.DateTimeFormat(lang, { dateStyle: "full" }).format(d));
+    b.disabled = day > today; // nothing is captured in the future
+    b.classList.toggle("out", d.getMonth() !== cal.view.getMonth());
+    b.classList.toggle("today", day === today);
+    cells.push(b);
+  }
+  $("dateGrid").replaceChildren(...cells);
+  paintRange();
+
+  // presets: the one that matches what is picked shows as chosen
+  $("datePresets").replaceChildren(...Object.entries(DATE_PRESETS).map(([key, range]) => {
+    const [a, b] = range(today);
+    const el = document.createElement("button");
+    el.type = "button";
+    el.textContent = t(key);
+    el.setAttribute("aria-pressed", cal.from === a && (cal.to ?? cal.from) === b);
+    el.onclick = () => pickDays(a, b);
+    return el;
+  }));
+  $("dateSummary").textContent = !cal.from ? t("date.pickStart")
+    : !cal.to ? `${formatDays(cal.from, cal.from)} – ${t("date.pickEnd")}`
+    : formatDays(...[cal.from, cal.to].sort());
+}
+/** Under the button, moved sideways as far as needed to stay inside the window (it opens toward the inline end). */
+function placeCalendar() {
+  const pop = $("datePop");
+  pop.style.transform = "";
+  const r = pop.getBoundingClientRect();
+  const shift = r.right > innerWidth - 8 ? innerWidth - 8 - r.right : r.left < 8 ? 8 - r.left : 0;
+  if (shift) pop.style.transform = `translateX(${shift}px)`;
+}
+window.addEventListener("resize", () => { if (cal.open) placeCalendar(); });
+
+/** Shade the range on the days shown: picked, or (first day picked) up to the day under the mouse. */
+function paintRange() {
+  const end = cal.to ?? cal.hover ?? cal.from;
+  const [lo, hi] = cal.from && end ? [cal.from, end].sort() : [null, null];
+  for (const b of $("dateGrid").querySelectorAll("button")) {
+    const day = b.dataset.day;
+    const inside = !!lo && day >= lo && day <= hi;
+    b.classList.toggle("in", inside);
+    b.classList.toggle("lo", day === lo);
+    b.classList.toggle("hi", day === hi);
+    b.classList.toggle("edge", day === cal.from || day === cal.to);
+    b.setAttribute("aria-selected", inside);
+  }
+}
+
+/** Pick a whole range (a preset) and show the month it ends in. */
+function pickDays(from, to) {
+  cal.from = from;
+  cal.to = to;
+  cal.hover = null;
+  const shown = parseDay(to);
+  cal.view = new Date(shown.getFullYear(), shown.getMonth(), 1);
+  renderCalendar();
+}
+function showMonth(year, month) {
+  cal.view = new Date(year, month, 1);
+  renderCalendar();
+}
+$("dateBtn").onclick = () => (cal.open ? closeCalendar(true) : openCalendar());
+$("datePrev").onclick = () => showMonth(cal.view.getFullYear(), cal.view.getMonth() - 1);
+$("dateNext").onclick = () => showMonth(cal.view.getFullYear(), cal.view.getMonth() + 1);
+$("dateYear").onchange = () => showMonth(+$("dateYear").value, cal.view.getMonth());
+$("dateMonth").onchange = () => showMonth(cal.view.getFullYear(), +$("dateMonth").value);
+$("dateGrid").onclick = (e) => {
+  const day = e.target.closest("button")?.dataset.day;
+  if (!day) return;
+  if (!cal.from || cal.to) { cal.from = day; cal.to = null; } // a new range
+  else [cal.from, cal.to] = [cal.from, day].sort(); // its last day (or, picked earlier, its first)
+  cal.hover = null;
+  const d = parseDay(day);
+  if (d.getMonth() !== cal.view.getMonth()) cal.view = new Date(d.getFullYear(), d.getMonth(), 1);
+  renderCalendar();
+  $("dateGrid").querySelector(`[data-day="${day}"]`)?.focus();
+};
+$("dateGrid").onmouseover = (e) => {
+  const day = e.target.closest("button:not(:disabled)")?.dataset.day;
+  if (!cal.from || cal.to || !day || day === cal.hover) return;
+  cal.hover = day;
+  paintRange();
+};
+$("dateGrid").onmouseleave = () => { if (cal.hover) { cal.hover = null; paintRange(); } };
+// arrows move between days (and on into the next or previous month)
+$("dateGrid").onkeydown = (e) => {
+  const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[e.key];
+  const day = document.activeElement?.dataset?.day;
+  if (!step || !day) return;
+  e.preventDefault();
+  const rtl = document.documentElement.dir === "rtl" && Math.abs(step) === 1 ? -1 : 1;
+  const next = addDays(day, step * rtl);
+  if (next > isoDay(new Date()) || next < `${FIRST_YEAR}-01-01`) return;
+  const d = parseDay(next);
+  if (d.getMonth() !== cal.view.getMonth() || d.getFullYear() !== cal.view.getFullYear()) showMonth(d.getFullYear(), d.getMonth());
+  $("dateGrid").querySelector(`[data-day="${next}"]`)?.focus();
+};
+$("dateReset").onclick = () => { cal.from = cal.to = cal.hover = null; renderCalendar(); };
+$("dateCancel").onclick = () => closeCalendar(true);
+$("dateApply").onclick = () => {
+  const [from, to] = cal.from ? [cal.from, cal.to ?? cal.from].sort() : [null, null]; // one day picked: that day
+  state.after = startOfDay(from);
+  state.before = to ? dayAfter(to) : null; // the whole last day
+  renderDateButton();
+  closeCalendar(true);
+  inputSeq++;
+  runSearch();
+};
+// Esc closes it (and only it: not a drawer or the selection behind); so does a click elsewhere
+$("datePop").addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  e.stopPropagation();
+  closeCalendar(true);
+});
+document.addEventListener("mousedown", (e) => {
+  if (cal.open && !$("dateFilter").contains(e.target) && !e.target.closest(".dropdown-menu")) closeCalendar();
+});
+renderDateButton();
 
 function setImage(blob) {
   inputSeq++;
@@ -1464,6 +1652,8 @@ function applyLanguage(code) {
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
   if (lastStatus) renderStatus(lastStatus);
   if (dlView) renderDownloads(dlView);
+  renderDateButton();
+  if (cal.open) renderCalendar();
   // once the saved language is known: the main process keeps these for a start without a window
   if (prefsLoaded) window.mmf?.setTrayLabels?.({
     open: t("tray.open"), settings: t("settings.title"), quit: t("tray.quit"), notice: t("tray.notice"), indexing: t("tray.indexing"),
@@ -1816,7 +2006,11 @@ $("indexToggle").onclick = async () => {
 let lastDone = -1, wasRunning = false, lastStatus = null;
 async function refreshStatus() {
   let s;
-  try { s = await api("/api/status"); } catch { $("status").textContent = "Can't connect to the engine"; hideBoot(); return; }
+  try { s = await api("/api/status"); } catch {
+    $("status").textContent = $("statusShort").textContent = "Can't connect to the engine";
+    hideBoot();
+    return;
+  }
   const { progress: p, folders, stats } = s;
   lastStatus = s;
   state.progress = p;
@@ -1840,6 +2034,15 @@ async function refreshStatus() {
   wasRunning = p.running;
 }
 
+/** The status details (opened from the ▶/⏸ button), one per line. */
+function setStatusLines(lines) {
+  $("status").replaceChildren(...lines.filter(Boolean).map((line) => {
+    const el = document.createElement("div");
+    el.append(line);
+    return el;
+  }));
+}
+
 /** Status line, progress bar and the folder drawer, drawn from the last /api/status answer. */
 function renderStatus(s) {
   const { progress: p, folders, stats } = s;
@@ -1854,28 +2057,28 @@ function renderStatus(s) {
   const eng = s.engine;
   const engLabel = eng.status === "ready" ? `${s.model} / ${eng.device in DEVICE_KEYS ? t(DEVICE_KEYS[eng.device]) : eng.device}`
     : eng.status === "error" ? "Model error" : t("engine.loading", { model: s.model });
-  $("status").title = eng.status === "error" ? eng.error || "" : "";
   if (p.running) {
     const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
-    const cur = p.current ? p.current.split(/[\\/]/).pop() : "";
-    const main = s.held === "battery" ? t("status.battery")
+    const simple = s.held === "battery" ? t("status.battery")
       : p.phase === "scanning" ? t("phase.scanning")
-      : p.phase === "loading-model" ? t("phase.loadingModel")
-      : `${t(p.phase === "names" ? "phase.names" : p.phase === "dates" ? "phase.updating" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%) ${cur}`.trim();
+      : p.phase === "loading-model" ? t("phase.loadingModel") : null;
+    const main = simple ?? `${t(p.phase === "names" ? "phase.names" : p.phase === "dates" ? "phase.updating" : "phase.indexing")} ${num(p.done)}/${num(p.total)} (${pct}%)`;
+    const cur = !simple && p.current ? p.current.split(/[\\/]/).pop() : "";
     // the time left for the whole run (file names and indexing together, estimated by the engine), in bold
     // right after what is being worked on
     const eta = s.eta != null ? t("eta", { time: fmtTime(s.eta) }) : "";
-    const parts = [main, counts];
-    if (eta) parts.splice(1, 0, { bold: eta });
-    $("status").replaceChildren(...parts.flatMap((part, i) => {
-      const node = typeof part === "string" ? part : Object.assign(document.createElement("b"), { textContent: part.bold });
-      return i ? [" / ", node] : [node];
-    }));
+    toggle.style.setProperty("--pct", pct);
+    $("statusShort").textContent = simple ?? `${pct}%`;
+    setStatusLines([main, eta && Object.assign(document.createElement("b"), { textContent: eta }),
+      // the file in hand: under "Indexing 12/300" it needs no label of its own
+      cur && Object.assign(document.createElement("span"), { className: "status-file", textContent: cur }), counts]);
     $("progress").classList.remove("hidden");
     $("progressBar").style.width = `${pct}%`;
   } else {
     const done = s.paused ? t("status.paused") : s.lastRun ? t("status.indexedAt", { time: fmtWhen(s.lastRun.finishedAt) }) : "";
-    $("status").textContent = [counts, done, engLabel].filter(Boolean).join(" / ");
+    // beside the button only while the model isn't ready (starting, or failed): searching waits on it then
+    $("statusShort").textContent = eng.status === "ready" ? "" : engLabel;
+    setStatusLines([counts, done, engLabel, eng.status === "error" && eng.error]);
     $("progress").classList.add("hidden");
   }
 
