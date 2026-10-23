@@ -281,6 +281,7 @@ function tile(r, list, i) {
   b.dataset.id = r.id;
   b.innerHTML = `<img loading="lazy" src="/thumb/${esc(r.thumb)}" alt="">${badges}${caption}`
     + `<span class="check" role="checkbox" aria-label="${esc(t("select"))}"></span>`;
+  addFavButton(b, r);
   b.classList.toggle("selected", selection.ids.has(r.id));
   b.querySelector(".check").setAttribute("aria-checked", selection.ids.has(r.id));
   const check = b.querySelector(".check");
@@ -288,6 +289,7 @@ function tile(r, list, i) {
   check.onclick = (e) => e.stopPropagation();
   b.onclick = () => {
     if (suppressTileClick) return; // the end of a checkbox sweep, not a click on the picture
+    if (selectMode) return toggleSelected(r.id); // selecting: a click picks the tile instead of opening it
     commitRecent();
     openViewer(list, i);
   };
@@ -303,6 +305,22 @@ function tile(r, list, i) {
   };
   b.oncontextmenu = (e) => { e.preventDefault(); fileMenu(e, r); };
   return b;
+}
+
+const starSvg = (size) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
+/** The ☆ in a tile's top-left corner (where the checkbox is while selecting): adds it to or takes it off favorites. */
+function addFavButton(el, r) {
+  el.dataset.path = r.path;
+  const fav = document.createElement("span");
+  fav.className = "fav";
+  fav.setAttribute("role", "button");
+  fav.innerHTML = starSvg(14);
+  fav.onclick = (e) => {
+    e.stopPropagation();
+    toggleFavorite([r.path], !favorites.has(r.path));
+  };
+  el.appendChild(fav);
+  markFavorite(el);
 }
 
 /** Grey tiles that stand in for results that are still loading. */
@@ -334,12 +352,23 @@ function hideBoot() {
 
 // ---------- selection & context menus ----------
 // Selection belongs to what is on screen (one search, or one folder): it is cleared when that changes.
+// Files are selected only in selection mode ("Select"); otherwise a click opens a file and the ☆ sits
+// where the checkbox would be.
 const selection = { ids: new Set(), key: "" };
+let selectMode = false;
 function syncSelection(key) {
   if (selection.key === key) return;
   selection.key = key;
-  clearSelection();
+  setSelectMode(false);
 }
+function setSelectMode(on) {
+  selectMode = on;
+  document.body.classList.toggle("select-mode", on);
+  if (!on && selection.ids.size) clearSelection();
+  else updateSelectAll();
+}
+$("browseSelectMode").onclick = () => setSelectMode(!selectMode);
+$("resultsSelectMode").onclick = () => setSelectMode(!selectMode);
 /** Drop selected files that are no longer listed (e.g. deleted outside the app), so they can't be copied blind. */
 function keepSelected(items) {
   if (!selection.ids.size) return;
@@ -369,9 +398,12 @@ function updateSelectAll() {
   const all = items.length > 0 && items.every((r) => selection.ids.has(r.id));
   const checked = all ? "true" : selection.ids.size ? "mixed" : "false";
   const active = isActive();
-  for (const [id, shown] of [["resultsSelectAll", active], ["browseSelectAll", !active]]) {
+  for (const [id, mode, shown] of [["resultsSelectAll", "resultsSelectMode", active], ["browseSelectAll", "browseSelectMode", !active]]) {
     $(id).setAttribute("aria-checked", checked);
-    $(id).classList.toggle("hidden", !shown || !items.length);
+    $(id).classList.toggle("hidden", !shown || !items.length || !selectMode);
+    // still shown with nothing left to select while selecting, so the mode can be turned off where it was turned on
+    $(mode).classList.toggle("hidden", !shown || (!items.length && !selectMode));
+    $(mode).setAttribute("aria-pressed", selectMode);
   }
 }
 function toggleSelectAll() {
@@ -490,17 +522,22 @@ const copyAction = (fn) => async () => {
 
 const MAX_COPY = 10000; // same limit as the main process and the engine
 
-/** Right-click on a file. With other files selected, it joins the selection and the menu acts on all of them. */
+/**
+ * Right-click on a file. While selecting, it joins the selection and the menu acts on all of them;
+ * otherwise it acts on that file alone.
+ */
 function fileMenu(e, r) {
-  if (selection.ids.size && !selection.ids.has(r.id)) { selection.ids.add(r.id); updateSelection(); }
-  if (selection.ids.size > 1) {
+  if (selectMode && selection.ids.size && !selection.ids.has(r.id)) { selection.ids.add(r.id); updateSelection(); }
+  if (selectMode && selection.ids.size > 1) {
     const ids = [...selection.ids];
+    const byId = new Map(selectableOnScreen().map((f) => [f.id, f.path]));
+    const paths = ids.map((id) => byId.get(id)).filter(Boolean);
     const copy = copyAction(async () => { await window.mmf.copyFiles(ids); clearSelection(); });
     return openMenu(e, [{
       label: t("menu.copyFile"),
       // over the limit: say so in the UI language and keep the selection (the main process rejects it anyway)
       run: () => (ids.length > MAX_COPY ? toast(t("toast.tooMany", { max: num(MAX_COPY), n: num(ids.length) }), 4000) : copy()),
-    }]);
+    }, ...albumItems(e, paths, paths.some((p) => !favorites.has(p)))]);
   }
   singleFileMenu(e, r);
 }
@@ -513,7 +550,149 @@ function singleFileMenu(e, r) {
       if (selection.ids.has(r.id)) clearSelection(); // copied the (single) selection
     }) },
     { label: t("menu.copyPath"), run: copyAction(() => window.mmf.copyPaths([r.id])) },
+    ...albumItems(e, [r.path], !favorites.has(r.path)),
   ].filter(Boolean));
+}
+
+/**
+ * The album entries of a file menu: favorites (add when `addFav`, else take off), "Add to album…", and
+ * "Remove from this album" in an album other than favorites.
+ */
+function albumItems(e, paths, addFav) {
+  if (!paths.length) return [];
+  const album = browse.data?.album;
+  return [
+    { label: t(addFav ? "fav.add" : "fav.remove"), run: () => toggleFavorite(paths, addFav) },
+    { label: t("menu.addToAlbum"), run: () => albumMenu(e, paths) },
+    !isActive() && album && !album.favorites && { label: t("menu.removeFromAlbum"), run: () => setAlbumItems(album, paths, false) },
+  ].filter(Boolean);
+}
+
+// ---------- favorites & albums ----------
+// Albums list files by path (the engine keeps them); favorites is the one that always exists. The page keeps
+// the favorites' paths to draw the ☆ on tiles and in the viewer.
+const FAVORITES_ID = 1;
+const ALBUM_PREFIX = "album:"; // a folder browser "path" that opens an album instead (real paths are absolute)
+const favorites = new Set();
+async function loadFavorites() {
+  try {
+    const { paths } = await api("/api/favorites");
+    favorites.clear();
+    for (const p of paths) favorites.add(p);
+    syncFavorites();
+  } catch { /* the ☆ stay empty until the next change */ }
+}
+function markFavorite(el) {
+  const on = favorites.has(el.dataset.path);
+  el.classList.toggle("fav-on", on);
+  const fav = el.querySelector(".fav");
+  fav?.setAttribute("aria-pressed", on);
+  fav?.setAttribute("aria-label", t(on ? "fav.remove" : "fav.add"));
+  if (fav) fav.title = t(on ? "fav.remove" : "fav.add");
+}
+function syncFavorites() {
+  for (const el of document.querySelectorAll(".tile[data-path]")) markFavorite(el);
+  const r = viewerResult();
+  const on = !!r && favorites.has(r.path);
+  $("vFav").setAttribute("aria-pressed", on);
+  $("vFavLabel").textContent = t(on ? "fav.remove" : "fav.add");
+  $("vFav").title = `${t(on ? "fav.remove" : "fav.add")} (F)`;
+}
+const albumName = (a) => (a.favorites ? t("album.favorites") : a.name);
+
+/** Add files to an album (on) or take them off; true when the engine took it. */
+async function setAlbumItems(album, paths, on) {
+  try {
+    await post("/api/album/items", { id: album.id, paths, on });
+  } catch (e) {
+    toast(`Couldn't change the album: ${e.message}`, 4000);
+    return false;
+  }
+  if (album.id === FAVORITES_ID) {
+    for (const p of paths) if (on) favorites.add(p); else favorites.delete(p);
+    syncFavorites();
+  } else if (on) {
+    toast(t("album.added", { name: albumName(album) }));
+  }
+  albumsChanged();
+  return true;
+}
+const toggleFavorite = (paths, on) => setAlbumItems({ id: FAVORITES_ID, favorites: true }, paths, on);
+
+/** The ☆ in the viewer, or F: in full screen (no side panel) a note says what happened. */
+async function toggleViewerFavorite() {
+  const r = viewerResult();
+  if (!r) return;
+  const on = !favorites.has(r.path);
+  if ((await toggleFavorite([r.path], on)) && isViewerFullscreen()) viewerToast(t(on ? "fav.added" : "fav.removed"));
+}
+
+/** The album counts on the start screen, or the album on screen, are out of date. */
+function albumsChanged() {
+  if (isActive()) return; // the start screen lists again when it comes back
+  if (state.viewer.list) { browse.stale = true; return; } // its list stays put while the viewer goes through it
+  if (!browse.path || browse.path.startsWith(ALBUM_PREFIX)) loadBrowse();
+}
+
+/** "Add to album…": a second menu, where the first was, with the albums and "New album…". */
+async function albumMenu(e, paths) {
+  let albums;
+  try { ({ albums } = await api("/api/albums")); } catch (err) { return toast(`Couldn't list the albums: ${err.message}`, 4000); }
+  openMenu(e, [
+    ...albums.filter((a) => !a.favorites).map((a) => ({ label: albumName(a), run: () => setAlbumItems(a, paths, true) })),
+    { label: t("album.newMenu"), run: async () => {
+      const album = await newAlbum();
+      if (album) setAlbumItems(album, paths, true);
+    } },
+  ]);
+}
+
+/** Ask for a name and make an album; null when canceled or refused. */
+async function newAlbum() {
+  const name = await promptDialog(t("album.namePrompt"), t("album.create"));
+  if (!name) return null;
+  try {
+    const { id } = await post("/api/albums", { name });
+    albumsChanged();
+    return { id, name, favorites: false };
+  } catch (e) {
+    toast(`Couldn't create the album: ${e.message}`, 4000);
+    return null;
+  }
+}
+async function renameAlbum(a) {
+  const name = await promptDialog(t("album.namePrompt"), t("album.rename"), a.name);
+  if (!name || name === a.name) return;
+  try { await post("/api/albums/rename", { id: a.id, name }); } catch (e) { return toast(`Couldn't rename the album: ${e.message}`, 4000); }
+  albumsChanged();
+}
+async function removeMissing(album, paths) {
+  const text = t("album.removeMissingConfirm", { n: num(paths.length), name: albumName(album) });
+  if (!(await confirmDialog(text, t("album.removeMissingYes")))) return;
+  // a drive reconnected while asking brings its files back: take off only those still not found
+  let d;
+  try { d = await api(`/api/album?id=${album.id}`); } catch (e) { return toast(`Couldn't change the album: ${e.message}`, 4000); }
+  const still = new Set(d.files.filter((f) => f.missing).map((f) => f.path));
+  const gone = paths.filter((p) => still.has(p));
+  if (!gone.length) return albumsChanged();
+  // the engine takes up to 10,000 files and 1 MiB a request: batches stay under both
+  const enc = new TextEncoder();
+  let batch = [], bytes = 0;
+  for (const p of gone) {
+    const n = enc.encode(JSON.stringify(p)).length + 1;
+    if (batch.length === 10000 || bytes + n > 900_000) {
+      if (!(await setAlbumItems(album, batch, false))) return;
+      batch = []; bytes = 0;
+    }
+    batch.push(p); bytes += n;
+  }
+  await setAlbumItems(album, batch, false);
+}
+async function deleteAlbum(a) {
+  if (!(await confirmDialog(t("album.deleteConfirm", { name: a.name }), t("confirm.delete")))) return;
+  try { await post("/api/albums/delete", { id: a.id }); } catch (e) { return toast(`Couldn't delete the album: ${e.message}`, 4000); }
+  if (browse.path === ALBUM_PREFIX + a.id) loadBrowse(null);
+  else albumsChanged();
 }
 
 // ---------- viewer ----------
@@ -531,6 +710,7 @@ function openViewer(list, i) {
     : `<span class="muted">${esc(t("viewer.relevance"))}</span> ${r.percent}% · <span class="muted">${esc(t("viewer.foundBy", { via: t(VIA_KEY[r.via] || "via.scene") }))}</span>`;
   $("vSimilar").disabled = r.vid == null;
   $("vReveal").disabled = $("vOpen").disabled = r.id == null; // not indexed yet: the main process opens files by id
+  syncFavorites();
   $("vText").classList.toggle("hidden", !r.text);
   $("vText").innerHTML = r.text ? `<p class="small muted">${esc(t("viewer.location"))}</p><div class="matched">${highlight(r.text, state.query)}</div>` : "";
 
@@ -666,6 +846,7 @@ $("closeViewer").onclick = closeViewer;
 const fileAction = (fn) => async () => {
   try { await fn(viewerResult().id); } catch (e) { toast(`Can't open: ${e.message}`); }
 };
+$("vFav").onclick = toggleViewerFavorite;
 $("vReveal").onclick = fileAction(window.mmf.reveal);
 $("vOpen").onclick = fileAction(window.mmf.openFile);
 $("vSimilar").onclick = () => {
@@ -843,7 +1024,7 @@ document.addEventListener("keydown", (e) => {
   const { list } = state.viewer;
   if (!list) {
     if (e.key === "Escape") {
-      if (selection.ids.size) clearSelection();
+      if (selectMode) setSelectMode(false);
       else closeDrawers();
     }
     return;
@@ -853,6 +1034,7 @@ document.addEventListener("keydown", (e) => {
     if (isViewerFullscreen()) document.exitFullscreen().catch(() => {});
     else closeViewer();
   }
+  if ((e.key === "f" || e.key === "F") && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) toggleViewerFavorite();
   if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
     e.preventDefault(); // not the focused video's own seek
     stepViewer(e.key === "ArrowRight" ? 1 : -1);
@@ -936,7 +1118,8 @@ function updateSortDir() {
 function updateHome() {
   const home = !isActive();
   $("hint").classList.toggle("hidden", !home || !state.hasIndex);
-  const show = home && state.hasFolders; // before anything is indexed too: the files can be looked at meanwhile
+  // before anything is indexed too: the files can be looked at meanwhile; and with no folder left, the albums
+  const show = home && (state.hasFolders || state.hasAlbums);
   const wasHidden = $("browser").classList.contains("hidden");
   $("browser").classList.toggle("hidden", !show);
   if (show && wasHidden) loadBrowse();
@@ -951,7 +1134,12 @@ async function loadBrowse(p = browse.want !== undefined ? browse.want : browse.p
   const seq = ++browse.seq;
   let d;
   try {
-    d = await api(`/api/browse${p ? `?path=${encodeURIComponent(p)}` : ""}`);
+    if (p?.startsWith(ALBUM_PREFIX)) {
+      d = await api(`/api/album?id=${encodeURIComponent(p.slice(ALBUM_PREFIX.length))}`);
+      d.path = p;
+    } else {
+      d = await api(`/api/browse${p ? `?path=${encodeURIComponent(p)}` : ""}`);
+    }
   } catch {
     if (p && seq === browse.seq) loadBrowse(null); // folder gone, removed or excluded: back to the top
     else hideBoot();
@@ -986,7 +1174,10 @@ function renderBrowse() {
     crumbs.appendChild(b);
   };
   crumb(t("browser.root"), null, !d.path);
-  if (d.path) {
+  if (d.album) {
+    crumbs.append("›");
+    crumb(albumName(d.album), d.path, true);
+  } else if (d.path) {
     const parts = d.path.slice(d.root.length).split(/[\\/]/).filter(Boolean);
     crumbs.append("›");
     crumb(d.root.split(/[\\/]/).filter(Boolean).pop() || d.root, d.root, !parts.length);
@@ -1011,24 +1202,29 @@ function renderBrowse() {
     };
     dirs.appendChild(b);
   }
+  renderAlbums(d.albums);
 
   const indexed = d.files.filter((f) => f.indexed);
-  // the viewer goes through every file here, those not indexed yet too (shown from the file itself)
-  const list = { results: d.files };
+  // the viewer goes through every file here, those not indexed yet too (shown from the file itself); an
+  // album's files that aren't found any more stay out of it
+  const viewable = d.files.filter((f) => !f.missing);
+  const list = { results: viewable };
   const grid = $("browseGrid");
   grid.innerHTML = "";
   previewObserver.disconnect(); // the tiles it watched are gone
-  d.files.slice(0, browse.shown).forEach((f, i) => {
+  d.files.slice(0, browse.shown).forEach((f) => {
     if (f.indexed) {
-      grid.appendChild(tile(f, list, i));
+      grid.appendChild(tile(f, list, viewable.indexOf(f)));
     } else {
       const el = document.createElement("button");
       el.type = "button";
-      el.className = "tile pending";
+      el.className = "tile pending" + (f.missing ? " missing" : "");
       el.title = f.path;
-      el.innerHTML = `<div><b>${esc(f.name)}</b>${esc(t(f.failed ? "browser.failed" : "browser.pending"))}</div>`;
-      el.onclick = () => openViewer(list, i);
-      if (!f.failed) { el._file = f; previewObserver.observe(el); } // the engine couldn't read it: no picture either
+      el.innerHTML = `<div><b>${esc(f.name)}</b>${esc(t(f.missing ? "album.missing" : f.failed ? "browser.failed" : "browser.pending"))}</div>`;
+      if (!f.missing) el.onclick = () => openViewer(list, viewable.indexOf(f));
+      el.oncontextmenu = (e) => { e.preventDefault(); openMenu(e, albumItems(e, [f.path], !favorites.has(f.path))); };
+      addFavButton(el, f);
+      if (!f.failed && !f.missing) { el._file = f; previewObserver.observe(el); } // the engine couldn't read it: no picture either
       grid.appendChild(el);
     }
   });
@@ -1043,12 +1239,49 @@ function renderBrowse() {
   }
   pumpPreviews(); // lets go of the previews the old tiles were waiting for
   const imgs = indexed.filter((f) => f.kind === "image").length;
-  const pending = d.files.filter((f) => !f.indexed && !f.failed).length;
+  const pending = d.files.filter((f) => !f.indexed && !f.failed && !f.missing).length;
   const failed = d.files.filter((f) => f.failed).length;
+  const missing = d.files.filter((f) => f.missing).length;
   $("browseNote").textContent = !d.path ? ""
+    : d.album && !d.files.length ? t("album.empty")
     : !d.files.length && !d.dirs.length ? t("browser.empty")
     : d.files.length ? [t("count.photos", { n: num(imgs) }), t("count.videos", { n: num(indexed.length - imgs) }),
-      pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) })].filter(Boolean).join(" / ") : "";
+      pending && t("count.pending", { n: num(pending) }), failed && t("count.failed", { n: num(failed) }),
+      missing && t("count.missing", { n: num(missing) })].filter(Boolean).join(" / ") : "";
+  // takes off every file not found, those past "show more" too: they can't be selected to do it in bulk
+  $("albumCleanup").classList.toggle("hidden", !(d.album && missing));
+  $("albumCleanup").onclick = () => removeMissing(d.album, d.files.filter((f) => f.missing).map((f) => f.path));
+}
+
+/** The start screen's albums row (above the indexed folders): favorites, the others, and "New album". */
+function renderAlbums(albums) {
+  $("albumRow").classList.toggle("hidden", !albums);
+  // the indexed folders, told apart from the albums above (none left: no heading over nothing)
+  $("localHead").classList.toggle("hidden", !albums || !browse.data?.dirs.length);
+  const row = $("albumList");
+  row.innerHTML = "";
+  if (!albums) return;
+  const ALBUM_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3.5" y="5.5" width="17" height="14" rx="2.5"/><path d="M3.5 16l4.5-4.5 4 4 3-3 5 5"/><circle cx="15.5" cy="9.5" r="1.5"/></svg>`;
+  for (const a of albums) {
+    const b = document.createElement("button");
+    b.type = "button";
+    if (a.favorites) b.className = "favorites";
+    b.innerHTML = `${a.favorites ? starSvg(18) : ALBUM_SVG}<span class="dn">${esc(albumName(a))}</span><span class="dc">${num(a.count)}</span>`;
+    b.onclick = () => loadBrowse(ALBUM_PREFIX + a.id);
+    if (!a.favorites) {
+      b.oncontextmenu = (e) => {
+        e.preventDefault();
+        openMenu(e, [{ label: t("album.rename"), run: () => renameAlbum(a) }, { label: t("album.delete"), run: () => deleteAlbum(a) }]);
+      };
+    }
+    row.appendChild(b);
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "album-new";
+  add.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span class="dn">${esc(t("album.new"))}</span>`;
+  add.onclick = newAlbum;
+  row.appendChild(add);
 }
 
 // ---------- previews of files not indexed yet ----------
@@ -1091,7 +1324,7 @@ async function loadPreview(el) {
       // the picture, still marked as waiting; the name on hover, as on indexed tiles
       el.classList.add("has-preview");
       el.replaceChildren(img, Object.assign(document.createElement("span"), { className: "badge tl", textContent: t("browser.pending") }),
-        Object.assign(document.createElement("span"), { className: "name", textContent: el._file.name }));
+        Object.assign(document.createElement("span"), { className: "name", textContent: el._file.name }), el.querySelector(".fav"));
     };
     img.src = url;
   } catch { /* let go of, or failed: the tile keeps its label */ }
@@ -1650,6 +1883,7 @@ function applyLanguage(code) {
   renderRecent();
   render();
   if (browse.data) { sortBrowse(browse.data); renderBrowse(); }
+  syncFavorites(); // the viewer's ☆ label
   if (lastStatus) renderStatus(lastStatus);
   if (dlView) renderDownloads(dlView);
   renderDateButton();
@@ -1836,6 +2070,7 @@ function confirmDialog(text, yes) {
   closeConfirm(false);
   closeMenu();
   $("confirmNo").classList.remove("hidden"); // a message's dialog hides it
+  $("confirmInput").classList.add("hidden"); // a name's dialog shows it
   $("confirmText").textContent = text;
   $("confirmYes").textContent = yes;
   $("confirmModal").classList.remove("hidden");
@@ -1856,6 +2091,17 @@ function alertDialog(text) {
   $("confirmYes").focus();
   return done;
 }
+/** A question with a text field (e.g. an album's name); the text, trimmed, or null when canceled. */
+async function promptDialog(text, yes, value = "") {
+  const done = confirmDialog(text, yes);
+  const input = $("confirmInput");
+  input.value = value;
+  input.classList.remove("hidden");
+  input.focus();
+  input.select();
+  return (await done) ? input.value.trim() : null;
+}
+$("confirmInput").onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) closeConfirm(true); };
 $("confirmYes").onclick = () => closeConfirm(true);
 $("confirmNo").onclick = () => closeConfirm(false);
 $("confirmModal").onclick = (e) => { if (e.target === e.currentTarget) closeConfirm(false); };
@@ -2016,6 +2262,7 @@ async function refreshStatus() {
   state.progress = p;
   state.hasIndex = stats.images + stats.videos > 0;
   state.hasFolders = folders.length > 0;
+  state.hasAlbums = s.hasAlbums === true;
   if (!state.hasIndex) hideBoot(); // otherwise the folder listing replaces the placeholders
   $("welcome").classList.toggle("hidden", folders.length > 0);
   updateHome();
@@ -2349,6 +2596,7 @@ if (window.mmf?.prepareDownloads) {
   syncDropdowns();
   browse.path = store.get("mmf.browse", null);
   recent = store.get(RECENT_KEY, []).filter((x) => typeof x === "string").slice(0, RECENT_MAX);
+  loadFavorites();
   refreshStatus();
   setInterval(refreshStatus, 1500);
   loadPerformance();

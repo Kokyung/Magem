@@ -211,15 +211,23 @@ input { font: inherit; color: inherit; }
   content: ""; width: 8px; height: 4px; margin-top: -2px; border: solid #fff; border-width: 0 0 2px 2px; transform: rotate(-45deg);
 }
 .select-all[aria-checked="mixed"] .round-check::after { content: ""; width: 8px; height: 2px; background: #fff; border-radius: 1px; }
-.browser-head .select-all { margin-inline-start: auto; }
-.browser-head .select-all:not(.hidden) + .sort { margin-inline-start: 0; }
+.browser-head .select-toggle { margin-inline-start: auto; }
+/* select-all sits left of the select toggle while selecting, so it takes over the push to the right */
+.browser-head .select-all:not(.hidden) { margin-inline-start: auto; }
+.browser-head .select-all:not(.hidden) ~ .select-toggle { margin-inline-start: 0; }
+.browser-head .select-toggle:not(.hidden) ~ .sort { margin-inline-start: 0; }
+/* "Select": turns selection mode on and off (on: filled like a pressed button) */
+.select-toggle { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--muted); }
+.select-toggle:hover { border-color: var(--muted); color: var(--text); }
+.select-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.select-toggle.icon-only { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; }
 /* stays in view under the header while scrolling through results, so select-all is always at hand */
 .results-bar {
   position: sticky; top: var(--top-height, 69px); z-index: 5; display: flex; align-items: center; gap: 12px;
   margin: 0 -24px 12px; padding: 8px 24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px);
 }
 .results-bar .summary { flex: 1; margin: 0; }
-.browser-head .sort .dropdown-btn { font-size: 13px; padding-block: 3px; padding-inline: 10px 28px; }
+.browser-head .sort .dropdown-btn { font-size: 13px; height: 30px; padding-block: 0; padding-inline: 10px 28px; }
 /* one button: ▶ starts a run (new and changed files), ⏸ pauses until pressed again */
 .index-toggle {
   --tone: var(--go);
@@ -289,16 +297,26 @@ main { padding: 8px 24px 60px; }
 }
 .badge.tl { top: 8px; left: 8px; transition: left .15s; }
 
-/* selection: a round checkbox in the top-left corner, shown on hover and while anything is selected;
-   a video's time badge moves aside to make room for it */
+/* The top-left corner: the ☆ (on hover, and always once it is a favorite), or while selecting ("Select"),
+   a round checkbox on every tile that can be selected. A video's time badge moves aside to make room. */
 .tile .check {
   position: absolute; top: 8px; left: 8px; z-index: 1; width: 22px; height: 22px; border-radius: 50%;
-  display: grid; place-items: center; border: 2px solid #fff; background: rgba(0,0,0,.28);
-  box-shadow: 0 1px 4px rgba(0,0,0,.35); opacity: 0; transition: opacity .15s, background .15s;
+  display: none; place-items: center; border: 2px solid #fff; background: rgba(0,0,0,.28);
+  box-shadow: 0 1px 4px rgba(0,0,0,.35); transition: background .15s;
 }
-.tile:hover .check, .tile:focus-visible .check, .selecting .tile .check { opacity: 1; }
+.select-mode .tile .check { display: grid; }
 .tile .check:hover { background: rgba(0,0,0,.5); }
-.tile:hover .badge.tl, .tile:focus-visible .badge.tl, .selecting .tile .badge.tl { left: 38px; }
+.tile .fav {
+  position: absolute; top: 8px; left: 8px; z-index: 1; width: 24px; height: 24px; border-radius: 50%;
+  display: grid; place-items: center; color: #fff; background: rgba(0,0,0,.4); fill: none;
+  box-shadow: 0 1px 4px rgba(0,0,0,.35); opacity: 0; transition: opacity .15s, background .15s, color .15s;
+}
+.tile:hover .fav, .tile:focus-visible .fav, .tile.fav-on .fav { opacity: 1; }
+.tile .fav:hover { background: rgba(0,0,0,.6); }
+.tile.fav-on .fav { color: var(--highlight); fill: currentColor; }
+.select-mode .tile .fav { display: none; }
+.tile:hover .badge.tl, .tile:focus-visible .badge.tl, .tile.fav-on .badge.tl, .select-mode .tile[data-id] .badge.tl { left: 38px; }
+.select-mode .tile.pending .badge.tl { left: 8px; } /* not selectable: no checkbox there */
 .tile.selected .check { background: var(--accent); }
 .tile.selected .check::after {
   content: ""; width: 9px; height: 5px; margin-top: -2px; border: solid #fff; border-width: 0 0 2px 2px; transform: rotate(-45deg);
@@ -334,6 +352,11 @@ main { padding: 8px 24px 60px; }
 .modal-card h3 { margin: 14px 0 6px; font-size: 17px; }
 .modal-card p { margin: 0 0 18px; white-space: pre-line; word-break: break-all; }
 .modal-actions { justify-content: center; }
+.modal-input {
+  display: block; width: 100%; margin: -6px 0 18px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: inherit; font: inherit; outline: 0;
+}
+.modal-input:focus { border-color: var(--accent); }
 .spinner {
   width: 34px; height: 34px; margin: 0 auto; border-radius: 50%;
   border: 3px solid var(--surface-2); border-top-color: var(--accent); animation: spin .9s linear infinite;
@@ -380,10 +403,18 @@ main { padding: 8px 24px 60px; }
 .dir-list svg { flex: none; color: var(--mint); }
 .dir-list .dn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dir-list .dc { flex: none; font-size: 12px; color: var(--muted); }
+/* albums, above the indexed folders on the start screen */
+.album-head { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.album-list svg { color: var(--violet); }
+.album-list .favorites svg { color: var(--highlight); fill: currentColor; }
+.album-list .album-new { border-style: dashed; color: var(--muted); }
+.album-list .album-new svg { color: var(--muted); }
 .tile.pending { display: grid; place-items: center; text-align: center; padding: 10px; color: var(--muted); font-size: 12px; border: 1px dashed var(--border); background: var(--surface); }
 .tile.pending b { display: block; font-weight: 600; margin-bottom: 4px; word-break: break-all; color: var(--text); }
 .tile.pending.has-preview { display: block; padding: 0; border: 0; }
-.tile.pending.has-preview .badge.tl { left: 8px; } /* no checkbox to make room for */
+.tile.pending.missing { cursor: default; opacity: .7; } /* an album's file that isn't found any more */
+.browse-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.browse-foot .ghost { padding: 4px 12px; }
 
 /* text-relevance sections */
 .result-section { margin-bottom: 36px; }
@@ -550,6 +581,9 @@ main { padding: 8px 24px 60px; }
 .viewer-side .close:hover { background: #2a2a2a; color: #fff; }
 .viewer .ghost { background: #222; border-color: #333; color: #eee; justify-content: center; }
 .viewer .ghost:hover { border-color: #666; }
+.viewer .fav-btn { display: inline-flex; align-items: center; gap: 8px; }
+.viewer .fav-btn svg { fill: none; }
+.viewer .fav-btn[aria-pressed="true"] svg { fill: currentColor; color: var(--highlight); }
 .viewer .matched {
   background: #222; border: 1px solid #333; border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.55;
   white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto;

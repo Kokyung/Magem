@@ -169,6 +169,7 @@ export function createServer({ index, previews, staticDir, token, modelName }) {
           return json(res, {
             progress: index.progress, folders: index.folders(), excluded: index.excluded(), stats: index.stats(),
             lastRun: index.pref("index.lastRun"), eta: index.eta(), paused: index.paused, held: index.held,
+            hasAlbums: index.hasAlbums(),
             model: modelName, engine: embedder.engine,
           });
         }
@@ -198,6 +199,9 @@ export function createServer({ index, previews, staticDir, token, modelName }) {
         if (p === "/api/browse") {
           return json(res, await index.browse(q.get("path") || null));
         }
+        if (p === "/api/albums") return json(res, { albums: index.albums() });
+        if (p === "/api/album") return json(res, await index.album(q.get("id")));
+        if (p === "/api/favorites") return json(res, { paths: index.favoritePaths() });
         if (p === "/api/fetch_image") return await proxyImage(res, q.get("url"));
         if (p === "/api/by_date") return json(res, index.byDate(searchParams(q)));
         if (p === "/api/similar") {
@@ -226,6 +230,10 @@ export function createServer({ index, previews, staticDir, token, modelName }) {
           index.removeFolder(body.path);
           return json(res, { ok: true });
         }
+        if (p === "/api/albums") return json(res, index.createAlbum(body.name));
+        if (p === "/api/albums/rename") { index.renameAlbum(body.id, body.name); return json(res, { ok: true }); }
+        if (p === "/api/albums/delete") { index.deleteAlbum(body.id); return json(res, { ok: true }); }
+        if (p === "/api/album/items") { await index.setAlbumItems(body.id, body.paths, body.on === true); return json(res, { ok: true }); }
         if (p === "/api/prefs") {
           if (!PREF_KEYS.has(body.key) || JSON.stringify(body.value ?? null).length > 64 << 10) return json(res, { error: "bad pref" }, 400);
           index.setPref(body.key, body.value ?? null);

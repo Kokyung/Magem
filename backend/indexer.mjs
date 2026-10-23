@@ -37,6 +37,12 @@ const NAME_CATCH_UP_MS = 10000;
 const PACE_GUESS = { image: 0.5, video: 7, name: 0.01, date: 0.005 };
 const PACE_PREF = "index.throughput"; // "index.pace" held per-worker times, a different measure
 const DATE_WORKERS = 4;
+// Albums are lists of file paths, not of index entries: a file changed and indexed again gets a new id, and
+// one not indexed yet has none. A file moved or deleted stays listed (shown as not found) until removed by
+// hand, and comes back by itself if a file appears at that path again.
+const FAVORITES = 1;
+const ALBUM_NAME_MAX = 100;
+const ALBUM_ITEMS_MAX = 10000; // per request
 const WATCH_QUIET_MS = 5000; // changes in the indexed folders start a run once quiet this long…
 const WATCH_MAX_WAIT_MS = 60000; // …or this long after the first, while they keep coming
 
@@ -146,7 +152,11 @@ export class Index {
         t REAL, t_end REAL, thumb TEXT, vec BLOB);
       CREATE INDEX IF NOT EXISTS vectors_file ON vectors(file_id);
       CREATE TABLE IF NOT EXISTS excluded (path TEXT PRIMARY KEY, added_at REAL);
-      CREATE TABLE IF NOT EXISTS prefs (key TEXT PRIMARY KEY, value TEXT);`);
+      CREATE TABLE IF NOT EXISTS prefs (key TEXT PRIMARY KEY, value TEXT);
+      CREATE TABLE IF NOT EXISTS albums (id INTEGER PRIMARY KEY, name TEXT UNIQUE COLLATE NOCASE, created_at REAL);
+      CREATE TABLE IF NOT EXISTS album_items (album_id INTEGER, path TEXT, added_at REAL, PRIMARY KEY (album_id, path));`);
+    // the favorites album: always there, named in the page's language (so no name of its own)
+    this.db.prepare("INSERT OR IGNORE INTO albums VALUES (?, NULL, 0)").run(FAVORITES);
     // columns added after the first release: name/OCR enrichment
     const cols = (t) => this.db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
     if (!cols("files").includes("name_done")) this.db.exec("ALTER TABLE files ADD COLUMN name_done INTEGER DEFAULT 0");
@@ -1119,7 +1129,7 @@ export class Index {
         try { mtime = (await fs.promises.stat(p)).mtimeMs; } catch { /* folder gone or offline */ }
         return { name: path.basename(p) || p, path: p, mtime, count };
       }));
-      return { path: null, root: null, dirs, files: [] };
+      return { path: null, root: null, dirs, files: [], albums: this.albums() };
     }
     const root = this.browsableRoot(dir, roots);
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -1192,6 +1202,126 @@ export class Index {
 
   isIndexed(file) {
     return !!this.db.prepare("SELECT 1 FROM files WHERE path=? AND status='done'").get(file);
+  }
+
+  // ---------- albums ----------
+  /** Every album with how many files it lists (found or not); favorites first, then oldest first. */
+  albums() {
+    return this.db.prepare(`SELECT a.id, a.name, (SELECT COUNT(*) FROM album_items WHERE album_id=a.id) AS count
+      FROM albums a ORDER BY a.id=? DESC, a.created_at, a.id`).all(FAVORITES)
+      .map((r) => ({ id: r.id, name: r.name, count: r.count, favorites: r.id === FAVORITES }));
+  }
+
+  /** Whether there is anything in the albums to look at or tidy up (also with no indexed folder left). */
+  hasAlbums() {
+    return !!this.db.prepare("SELECT 1 FROM albums WHERE id<>? UNION ALL SELECT 1 FROM album_items LIMIT 1").get(FAVORITES);
+  }
+
+  _albumRow(id) {
+    const row = this.db.prepare("SELECT id, name FROM albums WHERE id=?").get(Number(id));
+    if (!row) throw badRequest("This album no longer exists");
+    return row;
+  }
+
+  _albumName(name) {
+    name = typeof name === "string" ? name.normalize("NFC").trim() : "";
+    if (!name || name.length > ALBUM_NAME_MAX) throw badRequest(`An album name needs 1 to ${ALBUM_NAME_MAX} characters`);
+    return name;
+  }
+
+  createAlbum(name) {
+    name = this._albumName(name);
+    try {
+      return { id: Number(this.db.prepare("INSERT INTO albums (name, created_at) VALUES (?, ?)").run(name, Date.now() / 1000).lastInsertRowid) };
+    } catch (e) {
+      if (/UNIQUE/.test(e.message)) throw badRequest("An album with this name already exists");
+      throw e;
+    }
+  }
+
+  renameAlbum(id, name) {
+    const row = this._albumRow(id);
+    if (row.id === FAVORITES) throw badRequest("The favorites album can't be renamed");
+    name = this._albumName(name);
+    try {
+      this.db.prepare("UPDATE albums SET name=? WHERE id=?").run(name, row.id);
+    } catch (e) {
+      if (/UNIQUE/.test(e.message)) throw badRequest("An album with this name already exists");
+      throw e;
+    }
+  }
+
+  /** The album and its list; the files themselves are untouched. */
+  deleteAlbum(id) {
+    const row = this._albumRow(id);
+    if (row.id === FAVORITES) throw badRequest("The favorites album can't be deleted");
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM album_items WHERE album_id=?").run(row.id);
+      this.db.prepare("DELETE FROM albums WHERE id=?").run(row.id);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  favoritePaths() {
+    return this.db.prepare("SELECT path FROM album_items WHERE album_id=?").all(FAVORITES).map((r) => r.path);
+  }
+
+  /**
+   * Add files to an album (on) or take them off. Only files the app could show go in: indexed ones, or ones
+   * the folder browser lists. Taking off needs no check: a file not found any more is taken off this way too.
+   */
+  async setAlbumItems(id, paths, on) {
+    const row = this._albumRow(id);
+    if (!Array.isArray(paths) || !paths.length || paths.length > ALBUM_ITEMS_MAX || !paths.every((p) => typeof p === "string" && p)) {
+      throw badRequest(`Send between 1 and ${ALBUM_ITEMS_MAX.toLocaleString("en")} files`);
+    }
+    if (on) {
+      for (const p of paths) {
+        if (this.isIndexed(p)) continue;
+        const shown = await this.browsableFile(p).catch(() => null);
+        if (!shown) throw badRequest("Only photos and videos in indexed folders can be added to an album");
+      }
+    }
+    const add = this.db.prepare("INSERT OR IGNORE INTO album_items VALUES (?, ?, ?)");
+    const remove = this.db.prepare("DELETE FROM album_items WHERE album_id=? AND path=?");
+    const now = Date.now() / 1000;
+    this.db.exec("BEGIN");
+    try {
+      for (const p of paths) if (on) add.run(row.id, p, now); else remove.run(row.id, p);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /**
+   * An album's files, in the folder browser's form: indexed ones as in a folder, ones not indexed yet that
+   * the browser could list as waiting, and the rest (moved, deleted, or no longer in an indexed folder) as missing.
+   */
+  async album(id) {
+    const row = this._albumRow(id);
+    const paths = this.db.prepare("SELECT path FROM album_items WHERE album_id=?").all(row.id).map((r) => r.path);
+    const fileRow = this.db.prepare("SELECT id, path, kind, duration, thumb, status FROM files WHERE path=?");
+    const firstVisual = this.db.prepare("SELECT id FROM vectors WHERE file_id=? AND modality IN ('image','frame') ORDER BY t LIMIT 1");
+    const files = await Promise.all(paths.map(async (p) => {
+      const name = path.basename(p).normalize("NFC");
+      const ext = path.extname(p).toLowerCase();
+      const kind = media.VIDEO_EXT.has(ext) ? "video" : "image";
+      const st = await fs.promises.stat(p).catch(() => null);
+      const mtime = st?.mtimeMs ?? 0;
+      const f = fileRow.get(p);
+      if (st && f?.status === "done") {
+        return { id: f.id, path: f.path, name, mtime, kind: f.kind, duration: f.duration, thumb: f.thumb, vid: firstVisual.get(f.id)?.id ?? null, indexed: true };
+      }
+      if (st && (await this.browsableFile(p).catch(() => null))) return { path: p, name, mtime, kind, indexed: false, failed: f?.status === "error" };
+      return { path: p, name, mtime, kind, indexed: false, missing: true };
+    }));
+    return { path: null, root: null, album: { id: row.id, name: row.name, favorites: row.id === FAVORITES }, dirs: [], files };
   }
 
   /**

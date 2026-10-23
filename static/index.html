@@ -113,6 +113,11 @@
       <h2 data-i18n="browser.title"></h2>
       <nav class="crumbs" id="crumbs"></nav>
       <button class="select-all hidden" id="browseSelectAll" type="button" role="checkbox"><span class="round-check"></span><span data-i18n="select.all"></span></button>
+      <button class="select-toggle icon-only hidden" id="browseSelectMode" type="button" aria-pressed="false" data-i18n-title="select.mode">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/>
+        </svg>
+      </button>
       <div class="sort">
         <label class="select-field">
           <span data-i18n="browser.sortBy"></span>
@@ -129,13 +134,22 @@
         </button>
       </div>
     </div>
+    <div class="hidden" id="albumRow">
+      <h3 class="album-head" data-i18n="albums.title"></h3>
+      <div class="dir-list album-list" id="albumList"></div>
+    </div>
+    <h3 class="album-head hidden" id="localHead" data-i18n="browser.local"></h3>
     <div class="dir-list" id="dirList"></div>
     <div class="grid" id="browseGrid"></div>
     <div class="more" id="browseMore"></div>
-    <p class="muted small" id="browseNote"></p>
+    <div class="browse-foot">
+      <p class="muted small" id="browseNote"></p>
+      <button class="ghost small hidden" id="albumCleanup" type="button" data-i18n="album.removeMissing"></button>
+    </div>
   </section>
   <div class="results-bar">
     <div class="summary" id="summary"></div>
+    <button class="select-toggle hidden" id="resultsSelectMode" type="button" aria-pressed="false" data-i18n="select.mode"></button>
     <button class="select-all hidden" id="resultsSelectAll" type="button" role="checkbox"><span class="round-check"></span><span data-i18n="select.all"></span></button>
   </div>
   <div id="results"></div>
@@ -309,6 +323,10 @@
     <div id="vText" class="hidden"></div>
     <div id="vMoments"></div>
     <div class="col">
+      <button class="ghost fav-btn" id="vFav" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        <span id="vFavLabel"></span>
+      </button>
       <button class="ghost" id="vSimilar" data-i18n="viewer.similar"></button>
       <button class="ghost" id="vReveal"></button>
       <button class="ghost" id="vOpen" data-i18n="viewer.open"></button>
@@ -335,6 +353,7 @@
 <div class="modal hidden" id="confirmModal" role="alertdialog" aria-modal="true" aria-describedby="confirmText">
   <div class="modal-card">
     <p id="confirmText"></p>
+    <input class="modal-input hidden" id="confirmInput" type="text" maxlength="100" autocomplete="off">
     <div class="row modal-actions">
       <button class="ghost" id="confirmNo" type="button" data-i18n="backup.cancel"></button>
       <button class="primary" id="confirmYes" type="button"></button>
