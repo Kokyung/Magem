@@ -45,7 +45,13 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
 }
-const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+const post = (path, body) => {
+  // URL 인젝션 방지를 위한 경로 검증
+  if (typeof path !== 'string' || !path.startsWith('/api/')) {
+    throw new Error('Invalid API path');
+  }
+  return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+};
 
 function toast(msg, ms = 2600) { showToast($("toast"), msg, ms); }
 const TOAST_FADE_MS = 250; // the transition in CSS
@@ -59,6 +65,10 @@ function showToast(el, msg, ms) {
   if (el.classList.contains("leaving")) {
     el._t = setTimeout(() => { settleToast(el); showToast(el, msg, ms); }, TOAST_FADE_MS);
     return;
+  }
+  // 메시지가 문자열이 아닌 경우 예외 처리
+  if (typeof msg !== 'string') {
+    throw new Error('Toast message must be a string');
   }
   el.textContent = msg;
   el.classList.add("show");
@@ -94,6 +104,13 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 
 /** Escape text and mark the query's words in it. */
 function highlight(text, query) {
+  // 입력 값 검증
+  if (typeof text !== 'string') {
+    throw new Error('Highlight text must be a string');
+  }
+  if (typeof query !== 'string') {
+    throw new Error('Highlight query must be a string');
+  }
   const words = [...new Set(query.split(/\s+/).filter((w) => w.length >= 2))]
     .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   if (!words.length) return esc(text);
@@ -130,19 +147,45 @@ async function runSearch(append = null) {
     if (state.imageBlob) {
       await loadMain(seq, append, (p) => {
         withRefinement(p);
+        // 입력 값 검증
+        const imageBlob = state.imageBlob;
+        if (!imageBlob || typeof imageBlob !== 'object') {
+          throw new Error('Invalid image blob');
+        }
         return api(`/api/search_image?${p}`, { method: "POST", body: state.imageBlob });
       });
     } else if (state.similarVid != null) {
       await loadMain(seq, append, (p) => {
         withRefinement(p);
+        // similarVid 검증
+        if (typeof state.similarVid !== 'string' && typeof state.similarVid !== 'number') {
+          throw new Error('Invalid similar video ID');
+        }
         p.set("vid", state.similarVid);
-        if (state.similarExclude != null) p.set("exclude", state.similarExclude);
+        if (state.similarExclude != null) {
+          // similarExclude 검증
+          if (typeof state.similarExclude !== 'string' && typeof state.similarExclude !== 'number') {
+            throw new Error('Invalid similar exclude ID');
+          }
+          p.set("exclude", state.similarExclude);
+        }
         return api(`/api/similar?${p}`);
       });
     } else if (state.query) {
       await loadText(seq, append);
     } else if (hasDates()) {
-      await loadMain(seq, append, (p) => api(`/api/by_date?${p}`));
+      await loadMain(seq, append, (p) => {
+        // 날짜 범위 값이 유효한지 확인
+        const after = state.after;
+        const before = state.before;
+        if (after != null && typeof after !== 'number') {
+          throw new Error('Invalid date range: after must be a number');
+        }
+        if (before != null && typeof before !== 'number') {
+          throw new Error('Invalid date range: before must be a number');
+        }
+        return api(`/api/by_date?${p}`);
+      });
     } else {
       state.lists = {};
       render();
@@ -180,6 +223,11 @@ async function loadText(seq, appendKey) {
   p.set("q", state.query);
   if (appendKey) p.set("section", appendKey);
   else p.set("nameLimit", NAME_PAGE);
+  // 사용자 입력 값 검증
+  const query = state.query;
+  if (typeof query !== 'string') {
+    throw new Error('Invalid query parameter');
+  }
   const lists = await api(`/api/search?${p}`);
   if (seq !== state.seq) return;
   if (!appendKey) state.lists = {};
@@ -231,7 +279,16 @@ function render() {
 /** The chosen capture-date range, as shown in the summary ("Jul 1, 2025 ~ Aug 31, 2025", "~ Aug 31, 2025"). */
 function rangeLabel() {
   const day = (ms) => new Intl.DateTimeFormat(lang, { dateStyle: "medium" }).format(new Date(ms));
-  return `${state.after != null ? day(state.after) : ""} ~ ${state.before != null ? day(state.before - 1) : ""}`.trim();
+  // 날짜 범위 값이 유효한지 검증
+  const after = state.after;
+  const before = state.before;
+  if (after != null && typeof after !== 'number') {
+    throw new Error('Invalid date range: after must be a number');
+  }
+  if (before != null && typeof before !== 'number') {
+    throw new Error('Invalid date range: before must be a number');
+  }
+  return `${after != null ? day(after) : ""} ~ ${before != null ? day(before - 1) : ""}`.trim();
 }
 const withRange = (label) => (hasDates() ? `${label} / ${rangeLabel()}` : label);
 
@@ -1462,6 +1519,10 @@ let inputSeq = 0;
 function setQuery(q) {
   inputSeq++;
   q = q.trim();
+  // 쿼리 값 검증
+  if (typeof q !== 'string') {
+    throw new Error('Query must be a string');
+  }
   state.query = q; // with an image in the search box, the text refines that image search
   const byImage = state.imageBlob || state.similarVid != null;
   history.replaceState(null, "", q && !byImage ? `?q=${encodeURIComponent(q)}` : location.pathname);
@@ -1713,6 +1774,13 @@ $("dateReset").onclick = () => { cal.from = cal.to = cal.hover = null; renderCal
 $("dateCancel").onclick = () => closeCalendar(true);
 $("dateApply").onclick = () => {
   const [from, to] = cal.from ? [cal.from, cal.to ?? cal.from].sort() : [null, null]; // one day picked: that day
+  // 날짜 범위 값 검증
+  if (from != null && typeof from !== 'string') {
+    throw new Error('Invalid date range: from must be a string');
+  }
+  if (to != null && typeof to !== 'string') {
+    throw new Error('Invalid date range: to must be a string');
+  }
   state.after = startOfDay(from);
   state.before = to ? dayAfter(to) : null; // the whole last day
   renderDateButton();
