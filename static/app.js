@@ -53,7 +53,7 @@ const post = (path, body) => {
   return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 };
 
-function toast(msg, ms = 2600) { showToast($("toast"), msg, ms); }
+function toast(msg) { showToast($("toast"), msg, 5000); }
 const TOAST_FADE_MS = 250; // the transition in CSS
 /**
  * Fades a toast element in; after `ms` it fades out (both moving up, in CSS). A different message over a
@@ -2620,6 +2620,7 @@ $("dlForm").onsubmit = async (e) => {
   try {
     const r = await window.mmf.startDownload(urls, downloadStartFolder(), t("dl.pickFolder"), $("dlPostFolder").checked);
     if (r?.offline) return alertDialog(t("dl.offline"));
+    if (r?.invalidFolder) return toast(t("dl.invalidFolder"), 4000);
     if (r?.ids) {
       store.set("mmf.downloadFolder", r.folder);
       resetUrlFields();

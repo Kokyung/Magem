@@ -10,6 +10,7 @@ const LANGUAGES = [
 
 const MESSAGES = {
   en: {
+    "dl.invalidFolder": "Please choose a folder within the indexed scope.",
     "home": "Back to start",
     "search.placeholder": "Describe the scene you're looking for — e.g. a dog playing on the beach",
     "search.placeholderImage": "Add words to search with this image — e.g. night, smiling faces, beach",
@@ -120,6 +121,7 @@ const MESSAGES = {
       "Delicious food", "City lights at night", "Sound of applause", "Live music concert", "Dog running on the grass"],
   },
   ko: {
+    "dl.invalidFolder": "색인 범위내 폴더를 선택해주세요",
     "home": "처음 화면으로",
     "search.placeholder": "찾고 싶은 장면을 말로 설명해 보세요 — 예: 바닷가에서 뛰노는 강아지",
     "search.placeholderImage": "이 이미지와 함께 찾을 내용을 더해 보세요 — 예: 밤, 웃는 얼굴, 바닷가",
@@ -230,6 +232,7 @@ const MESSAGES = {
       "맛있는 음식", "밤의 도시 야경", "박수 치는 소리", "음악이 흐르는 공연", "잔디 위를 달리는 강아지"],
   },
   ja: {
+    "dl.invalidFolder": "索引対象のフォルダ、またはその中のフォルダを選択してください。",
     "home": "最初の画面へ",
     "search.placeholder": "探したい場面を言葉で説明してください — 例：砂浜で遊ぶ犬",
     "search.placeholderImage": "この画像と一緒に探す内容を追加 — 例：夜、笑顔、海辺",
@@ -339,6 +342,7 @@ const MESSAGES = {
       "おいしい料理", "夜の街の夜景", "拍手の音", "音楽が流れるライブ", "芝生を走る犬"],
   },
   "zh-CN": {
+    "dl.invalidFolder": "请选择已索引的文件夹或其子文件夹。",
     "home": "返回首页",
     "search.placeholder": "用文字描述你想找的画面 — 例如：在海边玩耍的小狗",
     "search.placeholderImage": "添加文字与这张图片一起搜索 — 例如：夜晚、笑脸、海边",
@@ -448,6 +452,7 @@ const MESSAGES = {
       "美味的食物", "城市夜景", "掌声", "现场音乐会", "在草地上奔跑的狗"],
   },
   "zh-TW": {
+    "dl.invalidFolder": "請選擇已建立索引的資料夾或其子資料夾。",
     "home": "回到首頁",
     "search.placeholder": "用文字描述你想找的畫面 — 例如：在海邊玩耍的小狗",
     "search.placeholderImage": "加入文字與這張圖片一起搜尋 — 例如：夜晚、笑臉、海邊",
@@ -557,6 +562,7 @@ const MESSAGES = {
       "美味的料理", "城市夜景", "掌聲", "現場音樂演出", "在草地上奔跑的狗"],
   },
   "es-ES": {
+    "dl.invalidFolder": "Selecciona una carpeta indexada o una subcarpeta dentro de ella.",
     "home": "Volver al inicio",
     "search.placeholder": "Describe la escena que buscas — p. ej., un perro jugando en la playa",
     "search.placeholderImage": "Añade palabras para buscar con esta imagen — p. ej., noche, caras sonrientes, playa",
@@ -666,6 +672,7 @@ const MESSAGES = {
       "Comida deliciosa", "Luces de la ciudad de noche", "Sonido de aplausos", "Concierto de música en directo", "Perro corriendo por el césped"],
   },
   "es-419": {
+    "dl.invalidFolder": "Selecciona una carpeta indexada o una subcarpeta dentro de ella.",
     "home": "Volver al inicio",
     "search.placeholder": "Describe la escena que buscas — p. ej., un perro jugando en la playa",
     "search.placeholderImage": "Agrega palabras para buscar con esta imagen — p. ej., noche, caras sonrientes, playa",
@@ -775,6 +782,7 @@ const MESSAGES = {
       "Comida deliciosa", "Luces de la ciudad de noche", "Sonido de aplausos", "Concierto de música en vivo", "Perro corriendo en el pasto"],
   },
   fr: {
+    "dl.invalidFolder": "Veuillez choisir un dossier indexé ou un sous-dossier de celui-ci.",
     "home": "Retour à l’accueil",
     "search.placeholder": "Décrivez la scène que vous cherchez — p. ex. un chien qui joue sur la plage",
     "search.placeholderImage": "Ajoutez des mots à chercher avec cette image — p. ex. nuit, visages souriants, plage",
@@ -884,6 +892,7 @@ const MESSAGES = {
       "Plat appétissant", "Lumières de la ville la nuit", "Bruit d’applaudissements", "Concert de musique live", "Chien qui court sur l’herbe"],
   },
   it: {
+    "dl.invalidFolder": "Seleziona una cartella indicizzata o una sua sottocartella.",
     "home": "Torna all’inizio",
     "search.placeholder": "Descrivi la scena che cerchi — ad es. un cane che gioca in spiaggia",
     "search.placeholderImage": "Aggiungi parole da cercare con questa immagine — ad es. notte, volti sorridenti, spiaggia",
@@ -993,6 +1002,7 @@ const MESSAGES = {
       "Cibo delizioso", "Luci della città di notte", "Rumore di applausi", "Concerto dal vivo", "Cane che corre sul prato"],
   },
   de: {
+    "dl.invalidFolder": "Bitte wähle einen indizierten Ordner oder einen seiner Unterordner aus.",
     "home": "Zurück zum Start",
     "search.placeholder": "Beschreibe die gesuchte Szene — z. B. ein Hund, der am Strand spielt",
     "search.placeholderImage": "Wörter hinzufügen, um mit diesem Bild zu suchen — z. B. Nacht, lachende Gesichter, Strand",
@@ -1102,6 +1112,7 @@ const MESSAGES = {
       "Leckeres Essen", "Lichter der Stadt bei Nacht", "Applaus", "Live-Konzert", "Hund, der über die Wiese rennt"],
   },
   ru: {
+    "dl.invalidFolder": "Выберите индексируемую папку или вложенную в неё папку.",
     "home": "На главный экран",
     "search.placeholder": "Опишите сцену, которую ищете, — например, собака играет на пляже",
     "search.placeholderImage": "Добавьте слова для поиска вместе с изображением — например, ночь, улыбки, пляж",
@@ -1211,6 +1222,7 @@ const MESSAGES = {
       "Вкусная еда", "Ночной город", "Звук аплодисментов", "Живой концерт", "Собака бежит по траве"],
   },
   uk: {
+    "dl.invalidFolder": "Виберіть індексовану папку або вкладену в неї папку.",
     "home": "На головний екран",
     "search.placeholder": "Опишіть сцену, яку шукаєте, — наприклад, собака грається на пляжі",
     "search.placeholderImage": "Додайте слова для пошуку разом із зображенням — наприклад, ніч, усмішки, пляж",
@@ -1320,6 +1332,7 @@ const MESSAGES = {
       "Смачна їжа", "Нічне місто", "Звук оплесків", "Живий концерт", "Собака біжить по траві"],
   },
   pl: {
+    "dl.invalidFolder": "Wybierz zindeksowany folder lub jeden z jego podfolderów.",
     "home": "Wróć do początku",
     "search.placeholder": "Opisz scenę, której szukasz — np. pies bawiący się na plaży",
     "search.placeholderImage": "Dodaj słowa do wyszukiwania z tym obrazem — np. noc, uśmiechnięte twarze, plaża",
@@ -1429,6 +1442,7 @@ const MESSAGES = {
       "Pyszne jedzenie", "Miasto nocą", "Dźwięk oklasków", "Koncert na żywo", "Pies biegnący po trawie"],
   },
   tr: {
+    "dl.invalidFolder": "Lütfen dizinlenen bir klasör veya onun içindeki bir alt klasörü seçin.",
     "home": "Başlangıca dön",
     "search.placeholder": "Aradığınız sahneyi anlatın — ör. kumsalda oynayan bir köpek",
     "search.placeholderImage": "Bu görselle birlikte aramak için kelime ekleyin — ör. gece, gülen yüzler, sahil",
@@ -1538,6 +1552,7 @@ const MESSAGES = {
       "Lezzetli yemek", "Gece şehir ışıkları", "Alkış sesi", "Canlı müzik konseri", "Çimlerde koşan köpek"],
   },
   hu: {
+    "dl.invalidFolder": "Válasszon egy indexelt mappát vagy annak egyik almappáját.",
     "home": "Vissza a kezdőképernyőre",
     "search.placeholder": "Írja le, milyen jelenetet keres — pl. egy kutya játszik a tengerparton",
     "search.placeholderImage": "Adjon meg szavakat a képpel együtt kereséshez — pl. éjszaka, mosolygó arcok, tengerpart",
@@ -1647,6 +1662,7 @@ const MESSAGES = {
       "Finom étel", "Éjszakai városfények", "Taps hangja", "Élő koncert", "Füvön futó kutya"],
   },
   cs: {
+    "dl.invalidFolder": "Vyberte indexovanou složku nebo některou z jejích podsložek.",
     "home": "Zpět na začátek",
     "search.placeholder": "Popište scénu, kterou hledáte — např. pes hrající si na pláži",
     "search.placeholderImage": "Přidejte slova pro hledání s tímto obrázkem — např. noc, usměvavé tváře, pláž",
@@ -1756,6 +1772,7 @@ const MESSAGES = {
       "Lahodné jídlo", "Noční světla města", "Zvuk potlesku", "Živý koncert", "Pes běžící po trávě"],
   },
   ar: {
+    "dl.invalidFolder": "يرجى اختيار مجلد مفهرس أو مجلد فرعي بداخله.",
     "home": "العودة إلى البداية",
     "search.placeholder": "صِف المشهد الذي تبحث عنه — مثلًا: كلب يلعب على الشاطئ",
     "search.placeholderImage": "أضف كلمات للبحث مع هذه الصورة — مثلًا: ليل، وجوه مبتسمة، شاطئ",

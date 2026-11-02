@@ -617,7 +617,7 @@ async function checkDownloadFolder(dir) {
     await engine("/api/download_folder", { path: dir });
     if (!fs.statSync(dir).isDirectory()) throw new Error("not a folder");
   } catch {
-    throw new Error("Choose an indexed folder, or a folder inside one that gets indexed (not hidden or excluded)");
+    throw Object.assign(new Error("Choose an indexed folder, or a folder inside one that gets indexed (not hidden or excluded)"), { code: "INVALID_DOWNLOAD_FOLDER" });
   }
 }
 function sendDownloads(view) {
@@ -645,7 +645,12 @@ ipcMain.handle("start-download", async (_e, urls, defaultDir, title, postFolder)
     properties: ["openDirectory", "createDirectory"],
   });
   if (r.canceled || !r.filePaths[0]) return { canceled: true };
-  return { ids: await downloads.add(urls, r.filePaths[0], postFolder !== false), folder: r.filePaths[0] };
+  try {
+    return { ids: await downloads.add(urls, r.filePaths[0], postFolder !== false), folder: r.filePaths[0] };
+  } catch (err) {
+    if (err.code === "INVALID_DOWNLOAD_FOLDER") return { invalidFolder: true };
+    throw err;
+  }
 });
 ipcMain.handle("remove-download", (_e, id) => downloads?.remove(id));
 ipcMain.handle("clear-done-downloads", () => downloads?.clearDone());
