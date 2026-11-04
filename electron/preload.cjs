@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("mmf", {
   platform: process.platform,
   systemLanguages: (process.argv.find((a) => a.startsWith("--mmf-langs=")) || "").slice(12).split(",").filter(Boolean),
-  pickFolders: (title) => ipcRenderer.invoke("pick-folders", String(title || "")),
+  pickFolders: (title, lastPicked) => ipcRenderer.invoke("pick-folders", String(title || ""), String(lastPicked || "")),
   setTheme: (theme) => ipcRenderer.invoke("set-theme", theme),
   getAppSettings: () => ipcRenderer.invoke("get-app-settings"),
   setOpenAtLogin: (on, hidden) => ipcRenderer.invoke("set-open-at-login", on === true, hidden === true),

@@ -2281,7 +2281,9 @@ async function addFolder(path) {
   } catch (e) { toast(e.message); }
 }
 async function pickFolder() {
-  for (const p of await window.mmf.pickFolders(t("picker.add"))) await addFolder(p);
+  const picked = await window.mmf.pickFolders(t("picker.add"), store.get("mmf.pickFolder", ""));
+  if (picked.length) store.set("mmf.pickFolder", picked.at(-1));
+  for (const p of picked) await addFolder(p);
 }
 $("pickFolder").onclick = pickFolder;
 $("pickExcluded").onclick = async () => {
@@ -2318,6 +2320,8 @@ $("indexToggle").onclick = async () => {
 };
 
 let lastDone = -1, wasRunning = false, lastStatus = null;
+// folders being removed: the list redraws every poll, so each keeps its spinner until the removal returns
+const removingFolders = new Set();
 async function refreshStatus() {
   let s;
   try { s = await api("/api/status"); } catch {
@@ -2403,13 +2407,22 @@ function renderStatus(s) {
     const li = document.createElement("li");
     li.title = f.path; // the whole path, which the card cuts short
     li.innerHTML = `<div class="fp"><b>${esc(f.path.split(/[\\/]/).pop() || f.path)}</b><span class="tail"><bdi>${esc(f.path)}</bdi></span><span>${esc(t("status.counts", { photos: num(f.images), videos: num(f.videos) }))}</span></div>`;
+    const spinner = document.createElement("span");
+    spinner.className = "spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    spinner.style.animationDelay = `-${Math.round(performance.now() % 900)}ms`; // same turn across redraws (.9s in CSS)
+    if (removingFolders.has(f.path)) { li.appendChild(spinner); ul.appendChild(li); return; }
     const rm = document.createElement("button");
     rm.className = "icon-btn";
     rm.title = t("folder.remove");
     rm.textContent = "×";
     rm.onclick = async () => {
+      if (removingFolders.has(f.path)) return;
       if (!(await confirmDialog(t("folder.removeConfirm", { path: f.path }), t("confirm.remove")))) return;
-      await post("/api/folders/remove", { path: f.path });
+      removingFolders.add(f.path);
+      // the list may have redrawn while the dialog was open: swap the button that is showing now
+      [...ul.children].find((el) => el.title === f.path)?.querySelector("button")?.replaceWith(spinner);
+      try { await post("/api/folders/remove", { path: f.path }); } finally { removingFolders.delete(f.path); }
       refreshStatus();
       runSearch();
       loadBrowse();

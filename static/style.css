@@ -480,6 +480,7 @@ main { padding: 8px 24px 60px; }
 .folders { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .folders li { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
 .folders .fp { flex: 1; min-width: 0; }
+.folders li > .spinner { flex: none; width: 20px; height: 20px; margin: 0 8px; border-width: 2px; } /* in the × button's 36px */
 .folders .fp b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folders .fp span { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 /* indexed and excluded folders: grids that scroll on their own, so dozens of them don't push the rest of the drawer away */

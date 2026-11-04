@@ -464,10 +464,12 @@ function copyFilesToClipboard(paths) {
   return clipboard.write([new ClipboardItem({ "text/uri-list": paths.map((p) => pathToFileURL(p).href).join("\r\n") })]);
 }
 
-// the title arrives already translated by the page; it is only ever shown as text
-ipcMain.handle("pick-folders", async (_e, title) => {
+// the title arrives already translated by the page; it is only ever shown as text. The chooser opens in the
+// folder picked last (only a starting point), or on the desktop before any.
+ipcMain.handle("pick-folders", async (_e, title, lastPicked) => {
   const r = await dialog.showOpenDialog(win, {
     title: typeof title === "string" ? title.slice(0, 200) : "",
+    defaultPath: typeof lastPicked === "string" && path.isAbsolute(lastPicked) ? lastPicked : app.getPath("desktop"),
     properties: ["openDirectory", "multiSelections", "createDirectory"],
   });
   return r.canceled ? [] : r.filePaths;
